@@ -406,7 +406,7 @@ Use include_html/include_text and optional selector to control content size.
     "url": "${BROWSER_SERVER_URL}/page/switch",
     "method": "POST",
     "headers": { "Content-Type": "application/json" },
-    "body": { "id": 0 }
+    "body": { "index": 0 }
   }
 }
 ```
@@ -423,7 +423,7 @@ Use include_html/include_text and optional selector to control content size.
 }
 ```
 
-### Close current page
+### Close current tab
 
 ```json
 {
@@ -435,25 +435,7 @@ Use include_html/include_text and optional selector to control content size.
 }
 ```
 
-Tip: 建议在任务完成后调用关闭页面，保持仅 about:blank 或必要标签，避免占用内存与句柄。
-
-### Screenshot
-
-```json
-{
-  "tool": "fetch",
-  "params": {
-    "url": "${BROWSER_SERVER_URL}/screenshot",
-    "method": "POST",
-    "headers": { "Content-Type": "application/json" },
-    "body": { "full_page": true }
-  }
-}
-```
-
 ### Export storage state
-
-path can be omitted to export into the default profile directory (./user_data/storage_state.json).
 
 ```json
 {
@@ -462,9 +444,7 @@ path can be omitted to export into the default profile directory (./user_data/st
     "url": "${BROWSER_SERVER_URL}/storage/export",
     "method": "POST",
     "headers": { "Content-Type": "application/json" },
-    "body": {
-      "include_json": false
-    }
+    "body": { "include_json": true }
   }
 }
 ```

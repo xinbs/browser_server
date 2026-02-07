@@ -53,8 +53,7 @@ Invoke-RestMethod -Uri "$base/cdp/send" -Method POST -ContentType "application/j
 Invoke-RestMethod -Uri "$base/cdp/send" -Method POST -ContentType "application/json" -Body '{"method":"Performance.getMetrics"}'
 
 # 11) 弹窗等待与处理（示例：alert/confirm/prompt）
-Invoke-RestMethod -Uri "$base/dialog/await" -Method POST -ContentType "application/json" -Body '{"timeout":10000}'
-Invoke-RestMethod -Uri "$base/dialog/accept" -Method POST -ContentType "application/json" -Body '{"prompt_text":"ok"}'
+Invoke-RestMethod -Uri "$base/dialog/await" -Method POST -ContentType "application/json" -Body '{"timeout":10000,"action":"accept"}'
 
 # 12) 关闭其他标签或当前页面
 Invoke-RestMethod -Uri "$base/page/close_others" -Method POST
@@ -66,10 +65,13 @@ Invoke-RestMethod -Uri "$base/download/dir" -Method POST -ContentType "applicati
 # 14) 查看最近下载
 Invoke-RestMethod -Uri "$base/downloads/last" -Method GET
 
-# 15) 导出存储状态（cookie、localStorage 等）
+# 15) 等待下载完成
+Invoke-RestMethod -Uri "$base/download/await" -Method POST -ContentType "application/json" -Body '{"timeout":30000}'
+
+# 16) 导出存储状态（cookie、localStorage 等）
 Invoke-RestMethod -Uri "$base/storage/export" -Method POST -ContentType "application/json" -Body '{"include_json":true}'
 
-# 16) 健康检查
+# 17) 健康检查
 Invoke-RestMethod -Uri "$base/health" -Method GET
 ```
 
@@ -112,8 +114,7 @@ curl -s "$base/cdp/send" -X POST -H "Content-Type: application/json" -d '{"metho
 curl -s "$base/cdp/send" -X POST -H "Content-Type: application/json" -d '{"method":"Performance.getMetrics"}'
 
 # 11) 弹窗等待与处理（示例：alert/confirm/prompt）
-curl -s "$base/dialog/await" -X POST -H "Content-Type: application/json" -d '{"timeout":10000}'
-curl -s "$base/dialog/accept" -X POST -H "Content-Type: application/json" -d '{"prompt_text":"ok"}'
+curl -s "$base/dialog/await" -X POST -H "Content-Type: application/json" -d '{"timeout":10000,"action":"accept"}'
 
 # 12) 关闭其他标签或当前页面
 curl -s "$base/page/close_others" -X POST
@@ -125,10 +126,13 @@ curl -s "$base/download/dir" -X POST -H "Content-Type: application/json" -d '{"p
 # 14) 查看最近下载
 curl -s "$base/downloads/last"
 
-# 15) 导出存储状态
+# 15) 等待下载完成
+curl -s "$base/download/await" -X POST -H "Content-Type: application/json" -d '{"timeout":30000}'
+
+# 16) 导出存储状态
 curl -s "$base/storage/export" -X POST -H "Content-Type: application/json" -d '{"include_json":true}'
 
-# 16) 健康检查
+# 17) 健康检查
 curl -s "$base/health"
 ```
 
