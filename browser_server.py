@@ -3,6 +3,7 @@ import base64
 import os
 import json
 import urllib.request
+import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -18,6 +19,9 @@ DEFAULT_HEADLESS = os.getenv("BROWSER_HEADLESS", "true").lower() in {"1", "true"
 AUTO_START = os.getenv("BROWSER_AUTO_START", "true").lower() in {"1", "true", "yes", "y"}
 DEFAULT_CHANNEL = os.getenv("BROWSER_CHANNEL") or "chrome"
 DEFAULT_DOWNLOAD_DIR = os.getenv("BROWSER_DOWNLOAD_DIR", os.path.abspath("downloads"))
+LOG_LEVEL = os.getenv("BROWSER_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("browser_server")
 
 
 class StartRequest(BaseModel):
@@ -132,6 +136,23 @@ class BrowserManager:
         self.user_data_dir: Optional[str] = None
         self.headless: Optional[bool] = None
         self.download_dir: str = DEFAULT_DOWNLOAD_DIR
+
+    async def _ensure_page(self):
+        if not self.context:
+            raise HTTPException(400, "Browser not started")
+        if not self.page:
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+            self._attach_page_listeners(self.page)
+            return
+        try:
+            await self.page.title()
+        except Exception:
+            pages = list(self.context.pages)
+            if pages:
+                self.page = pages[0]
+            else:
+                self.page = await self.context.new_page()
+            self._attach_page_listeners(self.page)
         self.downloads: list[dict] = []
         self.last_download: Optional[dict] = None
         self.dialog = None
@@ -206,6 +227,7 @@ class BrowserManager:
         os.makedirs(self.download_dir, exist_ok=True)
         self._attach_page_listeners(self.page)
         self.context.on("page", lambda p: self._attach_page_listeners(p))
+        logger.info("Browser started headless=%s user_data_dir=%s channel=%s", self.headless, self.user_data_dir, launch_channel)
         return {"success": True, "message": "Browser started", "headless": self.headless, "user_data_dir": self.user_data_dir}
 
     async def stop(self):
@@ -232,6 +254,7 @@ class BrowserManager:
         self.dialog_future = None
         self.download_future = None
 
+        logger.info("Browser stopped")
         return {"success": True, "message": "Browser stopped"}
 
     async def navigate(self, url: str, wait_until: str = "networkidle", timeout: int = 60000, extra_wait_ms: int = 3000):
@@ -239,6 +262,7 @@ class BrowserManager:
             raise HTTPException(400, "Browser not started. Call POST /start first.")
 
         try:
+            await self._ensure_page()
             await self.page.goto(url, wait_until=wait_until, timeout=timeout)
             if extra_wait_ms > 0:
                 await asyncio.sleep(extra_wait_ms / 1000)
@@ -251,6 +275,7 @@ class BrowserManager:
             raise HTTPException(400, "Browser not started")
 
         try:
+            await self._ensure_page()
             result = await self.page.evaluate(script, args)
             return {"success": True, "result": result if result is not None else None}
         except Exception as e:
@@ -261,6 +286,7 @@ class BrowserManager:
             raise HTTPException(400, "Browser not started")
 
         try:
+            await self._ensure_page()
             if selector:
                 await self.page.wait_for_selector(selector, timeout=timeout)
                 element = self.page.locator(selector).first
@@ -276,6 +302,7 @@ class BrowserManager:
             raise HTTPException(400, "Browser not started")
 
         try:
+            await self._ensure_page()
             title = await self.page.title()
             result = {
                 "success": True,
@@ -304,6 +331,7 @@ class BrowserManager:
             raise HTTPException(400, "Browser not started")
 
         try:
+            await self._ensure_page()
             if selector:
                 element = self.page.locator(selector)
                 buffer = await element.screenshot(timeout=timeout)
@@ -319,6 +347,7 @@ class BrowserManager:
             raise HTTPException(400, "Browser not started")
 
         try:
+            await self._ensure_page()
             if selector:
                 await self.page.locator(selector).wait_for(state="visible", timeout=timeout)
             if text:
@@ -330,12 +359,14 @@ class BrowserManager:
     async def click(self, selector: str, timeout: int = 10000):
         if not self.page:
             raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
         await self.page.locator(selector).click(timeout=timeout)
         return {"success": True}
 
     async def type(self, selector: str, text: str, timeout: int = 10000, clear_first: bool = True):
         if not self.page:
             raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
         locator = self.page.locator(selector)
         if clear_first:
             await locator.fill(text, timeout=timeout)
@@ -346,6 +377,7 @@ class BrowserManager:
     async def scroll(self, direction: str = "down", to_bottom: bool = False, amount: Optional[int] = None):
         if not self.page:
             raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
         if to_bottom:
             await self.page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
         elif amount:
@@ -359,12 +391,14 @@ class BrowserManager:
     async def click_point(self, x: float, y: float, button: str = "left", clicks: int = 1, delay: int = 0):
         if not self.page:
             raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
         await self.page.mouse.click(x, y, button=button, click_count=clicks, delay=delay)
         return {"success": True}
 
     async def element_box(self, selector: str, timeout: int = 30000):
         if not self.page:
             raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
         await self.page.wait_for_selector(selector, timeout=timeout)
         box = await self.page.locator(selector).first.bounding_box()
         if not box:
@@ -374,6 +408,7 @@ class BrowserManager:
     async def upload_files(self, selector: str, paths: list[str], timeout: int = 30000):
         if not self.page:
             raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
         if not paths:
             raise HTTPException(400, "No files provided")
         resolved = [os.path.abspath(p) for p in paths]
@@ -458,10 +493,12 @@ class BrowserManager:
             pages = list(context.pages)
             if len(pages) <= 1:
                 await self.page.goto("about:blank")
+                logger.info("Close page requested, single page remains")
                 return {"success": True, "remaining_pages": 1}
             await self.page.close()
             remaining_pages = list(context.pages)
             self.page = remaining_pages[0] if remaining_pages else await context.new_page()
+            logger.info("Close page requested, remaining_pages=%s", len(remaining_pages))
             return {"success": True, "remaining_pages": len(remaining_pages)}
         except Exception as e:
             raise HTTPException(500, f"Close page failed: {str(e)}")
@@ -479,6 +516,8 @@ class BrowserManager:
     async def get_status(self):
         if not self.context:
             return {"running": False, "url": None, "title": None, "headless": None, "user_data_dir": None}
+        if self.page:
+            await self._ensure_page()
         title = await self.page.title() if self.page else None
         return {
             "running": True,
@@ -491,6 +530,7 @@ class BrowserManager:
     async def list_pages(self):
         if not self.context:
             raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
         pages = []
         for idx, p in enumerate(self.context.pages):
             t = ""
@@ -534,7 +574,12 @@ class BrowserManager:
                     await p.close()
                 except Exception:
                     pass
-        return {"success": True, "remaining_pages": len(self.context.pages)}
+        remaining_pages = len(self.context.pages)
+        if remaining_pages == 0:
+            self.page = await self.context.new_page()
+            remaining_pages = 1
+        logger.info("Close other pages requested, remaining_pages=%s", remaining_pages)
+        return {"success": True, "remaining_pages": remaining_pages}
 
     async def cdp_send(self, method: str, params: Optional[dict] = None, timeout: int = 30000):
         if not self.context or not self.page:
@@ -622,9 +667,11 @@ browser_mgr = BrowserManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Service startup")
     if AUTO_START:
         await browser_mgr.start()
     yield
+    logger.info("Service shutdown")
     await browser_mgr.stop()
 
 

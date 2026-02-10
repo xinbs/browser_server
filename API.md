@@ -179,7 +179,7 @@ Response:
 
 ### POST /stop
 
-Stop browser.
+Stop browser. This does not stop the service process.
 
 Response:
 
