@@ -153,6 +153,17 @@ class BrowserManager:
             else:
                 self.page = await self.context.new_page()
             self._attach_page_listeners(self.page)
+
+    async def _retry_if_context_destroyed(self, func):
+        try:
+            return await func()
+        except Exception as e:
+            message = str(e)
+            if "Execution context was destroyed" in message or "Target page, context or browser has been closed" in message:
+                await self._ensure_page()
+                await asyncio.sleep(0.2)
+                return await func()
+            raise
         self.downloads: list[dict] = []
         self.last_download: Optional[dict] = None
         self.dialog = None
@@ -276,7 +287,7 @@ class BrowserManager:
 
         try:
             await self._ensure_page()
-            result = await self.page.evaluate(script, args)
+            result = await self._retry_if_context_destroyed(lambda: self.page.evaluate(script, args))
             return {"success": True, "result": result if result is not None else None}
         except Exception as e:
             raise HTTPException(500, f"Script execution failed: {str(e)}")
@@ -292,7 +303,7 @@ class BrowserManager:
                 element = self.page.locator(selector).first
                 text = await element.text_content()
             else:
-                text = await self.page.evaluate("() => document.body.innerText")
+                text = await self._retry_if_context_destroyed(lambda: self.page.evaluate("() => document.body.innerText"))
             return {"success": True, "text": text or "", "length": len(text or "")}
         except Exception as e:
             raise HTTPException(500, f"Get text failed: {str(e)}")
@@ -319,7 +330,7 @@ class BrowserManager:
                     element = self.page.locator(selector).first
                     text = await element.text_content()
                 else:
-                    text = await self.page.evaluate("() => document.body.innerText")
+                    text = await self._retry_if_context_destroyed(lambda: self.page.evaluate("() => document.body.innerText"))
                 result["text"] = text or ""
                 result["text_length"] = len(text or "")
             return result
@@ -379,13 +390,13 @@ class BrowserManager:
             raise HTTPException(400, "Browser not started")
         await self._ensure_page()
         if to_bottom:
-            await self.page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+            await self._retry_if_context_destroyed(lambda: self.page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)"))
         elif amount:
             delta = amount if direction == "down" else -amount
-            await self.page.evaluate(f"() => window.scrollBy(0, {delta})")
+            await self._retry_if_context_destroyed(lambda: self.page.evaluate(f"() => window.scrollBy(0, {delta})"))
         else:
             delta = "window.innerHeight" if direction == "down" else "-window.innerHeight"
-            await self.page.evaluate(f"() => window.scrollBy(0, {delta})")
+            await self._retry_if_context_destroyed(lambda: self.page.evaluate(f"() => window.scrollBy(0, {delta})"))
         return {"success": True}
 
     async def click_point(self, x: float, y: float, button: str = "left", clicks: int = 1, delay: int = 0):
@@ -613,12 +624,16 @@ class BrowserManager:
         if not self.context or not self.page:
             raise HTTPException(400, "Browser not started")
         try:
+            await self._ensure_page()
             await self.page.wait_for_selector(selector, timeout=timeout)
-            session = await self.context.new_cdp_session(self.page)
-            expression = f"document.querySelector({json.dumps(selector)})?.textContent || ''"
-            wait_seconds = max(timeout, 1) / 1000
-            result = await asyncio.wait_for(session.send("Runtime.evaluate", {"expression": expression, "returnByValue": True}), timeout=wait_seconds)
-            await session.detach()
+            async def run():
+                session = await self.context.new_cdp_session(self.page)
+                expression = f"document.querySelector({json.dumps(selector)})?.textContent || ''"
+                wait_seconds = max(timeout, 1) / 1000
+                result = await asyncio.wait_for(session.send("Runtime.evaluate", {"expression": expression, "returnByValue": True}), timeout=wait_seconds)
+                await session.detach()
+                return result
+            result = await self._retry_if_context_destroyed(run)
             text = ""
             if result and isinstance(result, dict):
                 value = result.get("result", {}).get("value")
