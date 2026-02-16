@@ -4,10 +4,14 @@ import os
 import json
 import urllib.request
 import logging
+import time
+import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from playwright.async_api import async_playwright, Page, BrowserContext, Browser
@@ -20,8 +24,20 @@ AUTO_START = os.getenv("BROWSER_AUTO_START", "true").lower() in {"1", "true", "y
 DEFAULT_CHANNEL = os.getenv("BROWSER_CHANNEL") or "chrome"
 DEFAULT_DOWNLOAD_DIR = os.getenv("BROWSER_DOWNLOAD_DIR", os.path.abspath("downloads"))
 LOG_LEVEL = os.getenv("BROWSER_LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
+LOG_FILE = os.getenv("BROWSER_LOG_FILE", os.path.abspath(os.path.join("logs", "app.log")))
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+_formatter = logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S %z")
+_formatter.converter = time.localtime
+_file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+_file_handler.setLevel(LOG_LEVEL)
+_file_handler.setFormatter(_formatter)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setLevel(LOG_LEVEL)
+_stream_handler.setFormatter(_formatter)
+logging.basicConfig(level=LOG_LEVEL, handlers=[_file_handler, _stream_handler])
 logger = logging.getLogger("browser_server")
+request_queue = deque()
+queue_condition = asyncio.Condition()
 
 
 class StartRequest(BaseModel):
@@ -274,9 +290,11 @@ class BrowserManager:
 
         try:
             await self._ensure_page()
+            logger.info("Navigate requested url=%s wait_until=%s timeout=%s", url, wait_until, timeout)
             await self.page.goto(url, wait_until=wait_until, timeout=timeout)
             if extra_wait_ms > 0:
                 await asyncio.sleep(extra_wait_ms / 1000)
+            logger.info("Navigate completed url=%s title=%s", self.page.url, await self.page.title())
             return {"success": True, "url": self.page.url, "title": await self.page.title()}
         except Exception as e:
             raise HTTPException(500, f"Navigation failed: {str(e)}")
@@ -557,6 +575,7 @@ class BrowserManager:
             raise HTTPException(400, "Browser not started")
         p = await self.context.new_page()
         self.page = p
+        logger.info("New page requested url=%s", url)
         if url:
             try:
                 await p.goto(url, wait_until=wait_until, timeout=timeout)
@@ -564,7 +583,11 @@ class BrowserManager:
                     await asyncio.sleep(extra_wait_ms / 1000)
             except Exception as e:
                 raise HTTPException(500, f"Open new page failed: {str(e)}")
-        return {"success": True, "id": self.context.pages.index(p), "url": p.url, "title": await p.title()}
+        try:
+            title = await p.title()
+        except Exception:
+            title = ""
+        return {"success": True, "id": self.context.pages.index(p), "url": p.url, "title": title}
 
     async def switch_page(self, id: int):
         if not self.context:
@@ -706,6 +729,52 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def log_requests(request, call_next):
+    start = time.time()
+    client = request.client.host if request.client else "-"
+    url = str(request.url)
+    status_code = 500
+    bypass_queue = request.url.path in {"/", "/health", "/queue/status", "/docs/raw", "/downloads", "/downloads/last"}
+    request_id = uuid.uuid4().hex
+    enqueue_time = time.time()
+    if not bypass_queue:
+        async with queue_condition:
+            request_queue.append(request_id)
+            start_position = len(request_queue)
+            queue_condition.notify_all()
+        async with queue_condition:
+            while request_queue[0] != request_id:
+                await queue_condition.wait()
+    else:
+        start_position = 0
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Queue-Request-Id"] = request_id
+        response.headers["X-Queue-Start-Position"] = str(start_position)
+        response.headers["X-Queue-Wait-Ms"] = str(int((start_time - enqueue_time) * 1000))
+        return response
+    except Exception as exc:
+        logger.exception("HTTP %s %s %s 500 error=%s", client, request.method, url, exc)
+        response = JSONResponse(status_code=500, content={"success": False, "error": "Internal Server Error"})
+        response.headers["X-Queue-Request-Id"] = request_id
+        response.headers["X-Queue-Start-Position"] = str(start_position)
+        response.headers["X-Queue-Wait-Ms"] = str(int((start_time - enqueue_time) * 1000))
+        return response
+    finally:
+        if not bypass_queue:
+            async with queue_condition:
+                if request_queue and request_queue[0] == request_id:
+                    request_queue.popleft()
+                elif request_id in request_queue:
+                    request_queue.remove(request_id)
+                queue_condition.notify_all()
+        elapsed_ms = int((time.time() - start) * 1000)
+        logger.info("HTTP %s %s %s %s %dms", client, request.method, url, status_code, elapsed_ms)
+
+
 @app.get("/")
 async def root():
     return {
@@ -719,6 +788,26 @@ async def root():
 @app.get("/health")
 async def health():
     return await browser_mgr.get_status()
+
+
+@app.get("/queue/status")
+async def queue_status():
+    async with queue_condition:
+        current = request_queue[0] if request_queue else None
+        total = len(request_queue)
+        waiting = total - 1 if total > 0 else 0
+    return {"success": True, "current_request_id": current, "queue_length": total, "waiting": waiting}
+
+
+@app.get("/docs/raw")
+async def docs_raw():
+    path = os.path.abspath("API.md")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return PlainTextResponse(content)
+    except Exception as e:
+        raise HTTPException(500, f"Read docs failed: {str(e)}")
 
 
 @app.post("/start")

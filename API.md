@@ -134,6 +134,12 @@ curl -s "$base/storage/export" -X POST -H "Content-Type: application/json" -d '{
 
 # 17) 健康检查
 curl -s "$base/health"
+
+# 18) 队列状态
+curl -s "$base/queue/status"
+
+# 19) 获取完整说明文档
+curl -s "$base/docs/raw"
 ```
 
 ### GET /
@@ -147,6 +153,12 @@ Response:
 - status
 - browser: same as GET /health
 
+Example:
+
+```bash
+curl -s "$base/"
+```
+
 ### GET /health
 
 Current browser status.
@@ -158,6 +170,58 @@ Response:
 - title
 - headless
 - user_data_dir
+
+Example:
+
+```bash
+curl -s "$base/health"
+```
+
+### GET /queue/status
+
+Queue status.
+This endpoint does not enter the request queue.
+
+Response:
+
+- success
+- current_request_id
+- queue_length
+- waiting
+
+Example:
+
+```bash
+curl -s "$base/queue/status"
+```
+
+### GET /docs/raw
+
+Return full API documentation (plain text).
+This endpoint does not enter the request queue.
+
+Example:
+
+```bash
+curl -s "$base/docs/raw"
+```
+
+### Queue bypass endpoints
+
+- /
+- /health
+- /queue/status
+- /docs/raw
+- /downloads
+- /downloads/last
+
+### Queue headers
+
+Every response includes:
+
+- X-Queue-Request-Id
+- X-Queue-Start-Position
+- X-Queue-Wait-Ms
 
 ### POST /start
 
@@ -177,6 +241,12 @@ Response:
 - headless
 - user_data_dir
 
+Example:
+
+```bash
+curl -s "$base/start" -X POST -H "Content-Type: application/json" -d '{"headless":false,"channel":"chrome"}'
+```
+
 ### POST /stop
 
 Stop browser. This does not stop the service process.
@@ -185,6 +255,12 @@ Response:
 
 - success
 - message
+
+Example:
+
+```bash
+curl -s "$base/stop" -X POST
+```
 
 ### POST /navigate
 
@@ -203,6 +279,12 @@ Response:
 - url
 - title
 
+Example:
+
+```bash
+curl -s "$base/navigate" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com","wait_until":"networkidle","extra_wait_ms":1000}'
+```
+
 ### POST /evaluate
 
 Evaluate JavaScript in page context.
@@ -218,6 +300,12 @@ Response:
 - success
 - result
 
+Example:
+
+```bash
+curl -s "$base/evaluate" -X POST -H "Content-Type: application/json" -d '{"script":"() => document.title"}'
+```
+
 ### GET /cdp/version
 
 Get DevTools version via CDP.
@@ -226,6 +314,12 @@ Response:
 
 - success
 - version
+
+Example:
+
+```bash
+curl -s "$base/cdp/version"
+```
 
 ### POST /cdp/send
 
@@ -242,6 +336,12 @@ Response:
 - success
 - result
 
+Example:
+
+```bash
+curl -s "$base/cdp/send" -X POST -H "Content-Type: application/json" -d '{"method":"Network.enable"}'
+```
+
 ### POST /cdp/dom/text
 
 Get element textContent via CDP.
@@ -256,6 +356,12 @@ Response:
 - success
 - text
 - length
+
+Example:
+
+```bash
+curl -s "$base/cdp/dom/text" -X POST -H "Content-Type: application/json" -d '{"selector":"h1"}'
+```
 
 ### POST /cdp/dom/html
 
@@ -272,6 +378,12 @@ Response:
 - html
 - length
 
+Example:
+
+```bash
+curl -s "$base/cdp/dom/html" -X POST -H "Content-Type: application/json" -d '{"selector":"body"}'
+```
+
 ### POST /cdp/dom/attributes
 
 Get element attributes via CDP.
@@ -285,6 +397,12 @@ Response:
 
 - success
 - attributes
+
+Example:
+
+```bash
+curl -s "$base/cdp/dom/attributes" -X POST -H "Content-Type: application/json" -d '{"selector":"a"}'
+```
 
 ### POST /upload
 
@@ -301,6 +419,12 @@ Response:
 - success
 - count
 
+Example:
+
+```bash
+curl -s "$base/upload" -X POST -H "Content-Type: application/json" -d '{"selector":"input[type=file]","paths":["./sample.txt"]}'
+```
+
 ### POST /download/dir
 
 Set download directory.
@@ -314,6 +438,12 @@ Response:
 - success
 - download_dir
 
+Example:
+
+```bash
+curl -s "$base/download/dir" -X POST -H "Content-Type: application/json" -d '{"path":"./downloads"}'
+```
+
 ### GET /downloads
 
 Get download history.
@@ -323,6 +453,12 @@ Response:
 - success
 - downloads
 
+Example:
+
+```bash
+curl -s "$base/downloads"
+```
+
 ### GET /downloads/last
 
 Get last downloaded file.
@@ -331,6 +467,12 @@ Response:
 
 - success
 - download
+
+Example:
+
+```bash
+curl -s "$base/downloads/last"
+```
 
 ### POST /download/await
 
@@ -344,6 +486,12 @@ Response:
 
 - success
 - download
+
+Example:
+
+```bash
+curl -s "$base/download/await" -X POST -H "Content-Type: application/json" -d '{"timeout":30000}'
+```
 
 ### POST /dialog/await
 
@@ -363,6 +511,12 @@ Response:
 - default_value
 - handled (when action provided)
 
+Example:
+
+```bash
+curl -s "$base/dialog/await" -X POST -H "Content-Type: application/json" -d '{"timeout":10000,"action":"accept"}'
+```
+
 ### POST /dialog/accept
 
 Accept dialog.
@@ -375,6 +529,12 @@ Response:
 
 - success
 
+Example:
+
+```bash
+curl -s "$base/dialog/accept" -X POST -H "Content-Type: application/json" -d '{"prompt_text":"ok"}'
+```
+
 ### POST /dialog/dismiss
 
 Dismiss dialog.
@@ -382,6 +542,12 @@ Dismiss dialog.
 Response:
 
 - success
+
+Example:
+
+```bash
+curl -s "$base/dialog/dismiss" -X POST
+```
 
 ### POST /element/box
 
@@ -396,6 +562,12 @@ Response:
 
 - success
 - box
+
+Example:
+
+```bash
+curl -s "$base/element/box" -X POST -H "Content-Type: application/json" -d '{"selector":"h1"}'
+```
 
 ### POST /click/point
 
@@ -412,6 +584,12 @@ Body:
 Response:
 
 - success
+
+Example:
+
+```bash
+curl -s "$base/click/point" -X POST -H "Content-Type: application/json" -d '{"x":120,"y":220,"button":"left","clicks":1}'
+```
 ### GET /text
 
 Get page text.
@@ -426,6 +604,12 @@ Response:
 - success
 - text
 - length
+
+Example:
+
+```bash
+curl -s "$base/text"
+```
 
 ### GET /current
 
@@ -446,6 +630,12 @@ Response:
 - html, html_length (when include_html=true)
 - text, text_length (when include_text=true)
 
+Example:
+
+```bash
+curl -s "$base/current?include_text=true"
+```
+
 ### GET /pages
 
 List all tabs.
@@ -454,6 +644,12 @@ Response:
 
 - success
 - pages: array of { id, url, title, current }
+
+Example:
+
+```bash
+curl -s "$base/pages"
+```
 
 ### POST /page/new
 
@@ -473,6 +669,12 @@ Response:
 - url
 - title
 
+Example:
+
+```bash
+curl -s "$base/page/new" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com"}'
+```
+
 ### POST /page/switch
 
 Switch current tab.
@@ -488,6 +690,12 @@ Response:
 - url
 - title
 
+Example:
+
+```bash
+curl -s "$base/page/switch" -X POST -H "Content-Type: application/json" -d '{"id":0}'
+```
+
 ### POST /page/close
 
 Close current page.
@@ -497,6 +705,12 @@ Response:
 - success
 - remaining_pages
 
+Example:
+
+```bash
+curl -s "$base/page/close" -X POST
+```
+
 ### POST /page/close_others
 
 Close all tabs except current.
@@ -505,6 +719,12 @@ Response:
 
 - success
 - remaining_pages
+
+Example:
+
+```bash
+curl -s "$base/page/close_others" -X POST
+```
 
 ### POST /screenshot
 
@@ -523,6 +743,12 @@ Response:
 - mime_type
 - size
 
+Example:
+
+```bash
+curl -s "$base/screenshot" -X POST -H "Content-Type: application/json" -d '{"full_page":true}'
+```
+
 ### POST /wait
 
 Wait for selector or text.
@@ -538,6 +764,12 @@ Response:
 - success
 - message
 
+Example:
+
+```bash
+curl -s "$base/wait" -X POST -H "Content-Type: application/json" -d '{"selector":"h1","timeout":10000}'
+```
+
 ### POST /click
 
 Click element.
@@ -550,6 +782,12 @@ Body:
 Response:
 
 - success
+
+Example:
+
+```bash
+curl -s "$base/click" -X POST -H "Content-Type: application/json" -d '{"selector":"a"}'
+```
 
 ### POST /type
 
@@ -566,6 +804,12 @@ Response:
 
 - success
 
+Example:
+
+```bash
+curl -s "$base/type" -X POST -H "Content-Type: application/json" -d '{"selector":"input[name=q]","text":"hello"}'
+```
+
 ### POST /scroll
 
 Scroll page.
@@ -579,6 +823,12 @@ Body:
 Response:
 
 - success
+
+Example:
+
+```bash
+curl -s "$base/scroll" -X POST -H "Content-Type: application/json" -d '{"direction":"down","amount":600}'
+```
 
 ### POST /storage/export
 
@@ -594,3 +844,9 @@ Response:
 - success
 - path
 - storage_state (when include_json=true)
+
+Example:
+
+```bash
+curl -s "$base/storage/export" -X POST -H "Content-Type: application/json" -d '{"include_json":true}'
+```
