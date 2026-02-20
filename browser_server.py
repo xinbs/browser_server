@@ -175,10 +175,13 @@ class BrowserManager:
             return await func()
         except Exception as e:
             message = str(e)
-            if "Execution context was destroyed" in message or "Target page, context or browser has been closed" in message:
+            if "Execution context was destroyed" in message:
                 await self._ensure_page()
                 await asyncio.sleep(0.2)
                 return await func()
+            if "Target page, context or browser has been closed" in message:
+                await self.stop()
+                raise HTTPException(400, "Browser not started")
             raise
         self.downloads: list[dict] = []
         self.last_download: Optional[dict] = None
@@ -530,6 +533,9 @@ class BrowserManager:
             logger.info("Close page requested, remaining_pages=%s", len(remaining_pages))
             return {"success": True, "remaining_pages": len(remaining_pages)}
         except Exception as e:
+            if "Target page, context or browser has been closed" in str(e):
+                await self.stop()
+                raise HTTPException(400, "Browser not started")
             raise HTTPException(500, f"Close page failed: {str(e)}")
 
     async def export_storage(self, path: Optional[str] = None, include_json: bool = False):
@@ -573,7 +579,13 @@ class BrowserManager:
     async def new_page(self, url: Optional[str] = None, wait_until: str = "networkidle", timeout: int = 60000, extra_wait_ms: int = 3000):
         if not self.context:
             raise HTTPException(400, "Browser not started")
-        p = await self.context.new_page()
+        try:
+            p = await self.context.new_page()
+        except Exception as e:
+            if "Target page, context or browser has been closed" in str(e):
+                await self.stop()
+                raise HTTPException(400, "Browser not started")
+            raise
         self.page = p
         logger.info("New page requested url=%s", url)
         if url:
@@ -601,19 +613,25 @@ class BrowserManager:
     async def close_others(self):
         if not self.context or not self.page:
             raise HTTPException(400, "Browser not started")
-        current = self.page
-        for p in list(self.context.pages):
-            if p is not current:
-                try:
-                    await p.close()
-                except Exception:
-                    pass
-        remaining_pages = len(self.context.pages)
-        if remaining_pages == 0:
-            self.page = await self.context.new_page()
-            remaining_pages = 1
-        logger.info("Close other pages requested, remaining_pages=%s", remaining_pages)
-        return {"success": True, "remaining_pages": remaining_pages}
+        try:
+            current = self.page
+            for p in list(self.context.pages):
+                if p is not current:
+                    try:
+                        await p.close()
+                    except Exception:
+                        pass
+            remaining_pages = len(self.context.pages)
+            if remaining_pages == 0:
+                self.page = await self.context.new_page()
+                remaining_pages = 1
+            logger.info("Close other pages requested, remaining_pages=%s", remaining_pages)
+            return {"success": True, "remaining_pages": remaining_pages}
+        except Exception as e:
+            if "Target page, context or browser has been closed" in str(e):
+                await self.stop()
+                raise HTTPException(400, "Browser not started")
+            raise
 
     async def cdp_send(self, method: str, params: Optional[dict] = None, timeout: int = 30000):
         if not self.context or not self.page:

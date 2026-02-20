@@ -269,7 +269,7 @@ Navigate to a URL.
 Body:
 
 - url: string, required
-- wait_until: string, default `networkidle`
+- wait_until: string, default `networkidle` (`domcontentloaded`/`load`/`networkidle`)
 - timeout: number, default `60000`
 - extra_wait_ms: number, default `3000`
 
@@ -278,6 +278,11 @@ Response:
 - success
 - url
 - title
+
+Notes:
+
+- `networkidle` waits for network to be quiet; long-polling or trackers may delay completion
+- use `domcontentloaded` or `load` to return earlier when main content is ready
 
 Example:
 
