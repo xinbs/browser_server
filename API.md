@@ -214,6 +214,9 @@ curl -s "$base/docs/raw"
 - /docs/raw
 - /downloads
 - /downloads/last
+- /debug/info
+- /network/requests
+- /network/request/{request_id}
 
 ### Queue headers
 
@@ -270,6 +273,8 @@ Body:
 
 - url: string, required
 - wait_until: string, default `networkidle` (`domcontentloaded`/`load`/`networkidle`)
+- wait_for_selector: string, optional
+- wait_for_text: string, optional
 - timeout: number, default `60000`
 - extra_wait_ms: number, default `3000`
 
@@ -287,7 +292,7 @@ Notes:
 Example:
 
 ```bash
-curl -s "$base/navigate" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com","wait_until":"networkidle","extra_wait_ms":1000}'
+curl -s "$base/navigate" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com","wait_until":"domcontentloaded","wait_for_selector":"h1","extra_wait_ms":500}'
 ```
 
 ### POST /evaluate
@@ -498,6 +503,27 @@ Example:
 curl -s "$base/download/await" -X POST -H "Content-Type: application/json" -d '{"timeout":30000}'
 ```
 
+### POST /download
+
+Download file by URL.
+
+Body:
+
+- url: string, required
+- path: string, optional
+- timeout: number, default `60000`
+
+Response:
+
+- success
+- download
+
+Example:
+
+```bash
+curl -s "$base/download" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com/file.zip"}'
+```
+
 ### POST /dialog/await
 
 Wait for dialog.
@@ -641,6 +667,29 @@ Example:
 curl -s "$base/current?include_text=true"
 ```
 
+### GET /find
+
+Find elements and return basic info.
+
+Query:
+
+- selector: string, required
+- text: string, optional
+- limit: number, default `20`
+- timeout: number, default `30000`
+
+Response:
+
+- success
+- count
+- items: array of { index, text, href }
+
+Example:
+
+```bash
+curl -s "$base/find?selector=a&text=Telegraph&limit=10"
+```
+
 ### GET /pages
 
 List all tabs.
@@ -664,6 +713,8 @@ Body:
 
 - url: string, optional
 - wait_until: string, default `networkidle`
+- wait_for_selector: string, optional
+- wait_for_text: string, optional
 - timeout: number, default `60000`
 - extra_wait_ms: number, default `3000`
 
@@ -677,7 +728,7 @@ Response:
 Example:
 
 ```bash
-curl -s "$base/page/new" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com"}'
+curl -s "$base/page/new" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com","wait_for_selector":"h1"}'
 ```
 
 ### POST /page/switch
@@ -782,6 +833,8 @@ Click element.
 Body:
 
 - selector: string, required
+- text_contains: string, optional
+- index: number, optional
 - timeout: number, default `10000`
 
 Response:
@@ -791,7 +844,7 @@ Response:
 Example:
 
 ```bash
-curl -s "$base/click" -X POST -H "Content-Type: application/json" -d '{"selector":"a"}'
+curl -s "$base/click" -X POST -H "Content-Type: application/json" -d '{"selector":"a","text_contains":"Telegraph"}'
 ```
 
 ### POST /type
@@ -813,6 +866,66 @@ Example:
 
 ```bash
 curl -s "$base/type" -X POST -H "Content-Type: application/json" -d '{"selector":"input[name=q]","text":"hello"}'
+```
+
+### POST /fill
+
+Fill input value.
+
+Body:
+
+- selector: string, required
+- value: string, required
+- timeout: number, default `10000`
+
+Response:
+
+- success
+
+Example:
+
+```bash
+curl -s "$base/fill" -X POST -H "Content-Type: application/json" -d '{"selector":"input[name=q]","value":"hello"}'
+```
+
+### POST /press
+
+Press keyboard shortcut.
+
+Body:
+
+- key: string, required
+- modifiers: array, optional
+- timeout: number, default `10000`
+
+Response:
+
+- success
+
+Example:
+
+```bash
+curl -s "$base/press" -X POST -H "Content-Type: application/json" -d '{"key":"S","modifiers":["Control"]}'
+```
+
+### POST /drag
+
+Drag element to target.
+
+Body:
+
+- source: string, required
+- target: string, required
+- timeout: number, default `10000`
+
+Response:
+
+- success
+
+Example:
+
+```bash
+curl -s "$base/drag" -X POST -H "Content-Type: application/json" -d '{"source":"#drag","target":"#drop"}'
 ```
 
 ### POST /scroll
@@ -854,4 +967,105 @@ Example:
 
 ```bash
 curl -s "$base/storage/export" -X POST -H "Content-Type: application/json" -d '{"include_json":true}'
+```
+
+### POST /storage/import
+
+Import storage state.
+
+Body:
+
+- cookies: array, optional
+- local_storage: object, optional
+- url: string, optional
+- timeout: number, default `30000`
+
+Response:
+
+- success
+
+Example:
+
+```bash
+curl -s "$base/storage/import" -X POST -H "Content-Type: application/json" -d '{"cookies":[{"name":"a","value":"1","url":"https://example.com"}]}'
+```
+
+### GET /network/requests
+
+List network requests.
+
+Query:
+
+- pattern: string, optional
+- limit: number, default `100`
+- include_body: boolean, default `false`
+
+Response:
+
+- success
+- count
+- items
+
+Example:
+
+```bash
+curl -s "$base/network/requests?pattern=api&limit=20"
+```
+
+### GET /network/request/{request_id}
+
+Get a network request by id.
+
+Query:
+
+- include_body: boolean, default `false`
+
+Response:
+
+- success
+- request
+
+Example:
+
+```bash
+curl -s "$base/network/request/9b1f1a4b0a2e4a54b1d6b2f0d7f84a2a"
+```
+
+### GET /debug/info
+
+Debug info for browser state.
+
+Response:
+
+- success
+- status
+- pages
+- downloads
+
+Example:
+
+```bash
+curl -s "$base/debug/info"
+```
+
+### GET /debug/snapshot
+
+Snapshot current page content.
+
+Query:
+
+- timeout: number, default `30000`
+
+Response:
+
+- success
+- url
+- title
+- html
+- text
+
+Example:
+
+```bash
+curl -s "$base/debug/snapshot?timeout=10000"
 ```

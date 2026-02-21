@@ -6,6 +6,7 @@ import urllib.request
 import logging
 import time
 import uuid
+import re
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -52,6 +53,8 @@ class NavigateRequest(BaseModel):
     wait_until: str = Field("networkidle")
     timeout: int = Field(60000)
     extra_wait_ms: int = Field(3000)
+    wait_for_selector: Optional[str] = Field(None)
+    wait_for_text: Optional[str] = Field(None)
 
 
 class EvaluateRequest(BaseModel):
@@ -75,6 +78,8 @@ class WaitRequest(BaseModel):
 class ClickRequest(BaseModel):
     selector: str = Field(...)
     timeout: int = Field(10000)
+    text_contains: Optional[str] = Field(None)
+    index: Optional[int] = Field(None)
 
 
 class TypeRequest(BaseModel):
@@ -82,6 +87,21 @@ class TypeRequest(BaseModel):
     text: str = Field(...)
     timeout: int = Field(10000)
     clear_first: bool = Field(True)
+
+class FillRequest(BaseModel):
+    selector: str = Field(...)
+    value: str = Field(...)
+    timeout: int = Field(10000)
+
+class PressRequest(BaseModel):
+    key: str = Field(...)
+    modifiers: Optional[list[str]] = Field(None)
+    timeout: int = Field(10000)
+
+class DragRequest(BaseModel):
+    source: str = Field(...)
+    target: str = Field(...)
+    timeout: int = Field(10000)
 
 
 class ScrollRequest(BaseModel):
@@ -94,11 +114,19 @@ class StorageExportRequest(BaseModel):
     path: Optional[str] = Field(None)
     include_json: bool = Field(False)
 
+class StorageImportRequest(BaseModel):
+    cookies: Optional[list] = Field(None)
+    local_storage: Optional[dict] = Field(None)
+    url: Optional[str] = Field(None)
+    timeout: int = Field(30000)
+
 class NewPageRequest(BaseModel):
     url: Optional[str] = Field(None)
     wait_until: str = Field("networkidle")
     timeout: int = Field(60000)
     extra_wait_ms: int = Field(3000)
+    wait_for_selector: Optional[str] = Field(None)
+    wait_for_text: Optional[str] = Field(None)
 
 class SwitchPageRequest(BaseModel):
     id: int = Field(...)
@@ -142,6 +170,11 @@ class ClickPointRequest(BaseModel):
 class DownloadWaitRequest(BaseModel):
     timeout: int = Field(30000)
 
+class DownloadRequest(BaseModel):
+    url: str = Field(...)
+    path: Optional[str] = Field(None)
+    timeout: int = Field(60000)
+
 
 class BrowserManager:
     def __init__(self):
@@ -152,6 +185,15 @@ class BrowserManager:
         self.user_data_dir: Optional[str] = None
         self.headless: Optional[bool] = None
         self.download_dir: str = DEFAULT_DOWNLOAD_DIR
+        self.downloads: list[dict] = []
+        self.last_download: Optional[dict] = None
+        self.dialog = None
+        self.dialog_future: Optional[asyncio.Future] = None
+        self.download_future: Optional[asyncio.Future] = None
+        self.network_requests = deque()
+        self.network_request_map: dict[str, dict] = {}
+        self.network_request_id_map: dict[int, str] = {}
+        self.network_limit = 2000
 
     async def _ensure_page(self):
         if not self.context:
@@ -183,11 +225,6 @@ class BrowserManager:
                 await self.stop()
                 raise HTTPException(400, "Browser not started")
             raise
-        self.downloads: list[dict] = []
-        self.last_download: Optional[dict] = None
-        self.dialog = None
-        self.dialog_future: Optional[asyncio.Future] = None
-        self.download_future: Optional[asyncio.Future] = None
 
     async def _handle_download(self, download):
         info = None
@@ -206,6 +243,53 @@ class BrowserManager:
     def _attach_page_listeners(self, page: Page):
         page.on("download", lambda download: asyncio.create_task(self._handle_download(download)))
 
+    def _store_network_entry(self, entry_id: str, entry: dict):
+        self.network_requests.append(entry_id)
+        self.network_request_map[entry_id] = entry
+        if len(self.network_requests) > self.network_limit:
+            old_id = self.network_requests.popleft()
+            old_entry = self.network_request_map.pop(old_id, None)
+            if old_entry and "request_object_id" in old_entry:
+                self.network_request_id_map.pop(old_entry["request_object_id"], None)
+
+    async def _handle_request(self, request):
+        entry_id = uuid.uuid4().hex
+        request_object_id = id(request)
+        self.network_request_id_map[request_object_id] = entry_id
+        entry = {
+            "id": entry_id,
+            "request_object_id": request_object_id,
+            "url": request.url,
+            "method": request.method,
+            "resource_type": request.resource_type,
+            "headers": dict(request.headers),
+            "post_data": request.post_data,
+            "timestamp": time.time(),
+            "response_status": None,
+            "response_headers": None,
+            "response_body": None,
+        }
+        self._store_network_entry(entry_id, entry)
+
+    async def _handle_response(self, response):
+        request_object_id = id(response.request)
+        req_id = self.network_request_id_map.get(request_object_id)
+        if not req_id:
+            return
+        entry = self.network_request_map.get(req_id)
+        if not entry:
+            return
+        entry["response_status"] = response.status
+        entry["response_headers"] = dict(response.headers)
+        content_type = response.headers.get("content-type", "")
+        should_read = any(token in content_type for token in ["text", "json", "javascript", "xml", "html"])
+        if should_read:
+            try:
+                text = await response.text()
+                entry["response_body"] = text[:10000]
+            except Exception:
+                entry["response_body"] = None
+        self.network_request_id_map.pop(request_object_id, None)
     async def start(self, headless: Optional[bool] = None, user_data_dir: Optional[str] = None, user_agent: Optional[str] = None, channel: Optional[str] = None):
         if self.context:
             return {"success": True, "message": "Browser already running"}
@@ -257,6 +341,8 @@ class BrowserManager:
         os.makedirs(self.download_dir, exist_ok=True)
         self._attach_page_listeners(self.page)
         self.context.on("page", lambda p: self._attach_page_listeners(p))
+        self.context.on("request", lambda r: asyncio.create_task(self._handle_request(r)))
+        self.context.on("response", lambda r: asyncio.create_task(self._handle_response(r)))
         logger.info("Browser started headless=%s user_data_dir=%s channel=%s", self.headless, self.user_data_dir, launch_channel)
         return {"success": True, "message": "Browser started", "headless": self.headless, "user_data_dir": self.user_data_dir}
 
@@ -283,11 +369,14 @@ class BrowserManager:
         self.dialog = None
         self.dialog_future = None
         self.download_future = None
+        self.network_requests.clear()
+        self.network_request_map.clear()
+        self.network_request_id_map.clear()
 
         logger.info("Browser stopped")
         return {"success": True, "message": "Browser stopped"}
 
-    async def navigate(self, url: str, wait_until: str = "networkidle", timeout: int = 60000, extra_wait_ms: int = 3000):
+    async def navigate(self, url: str, wait_until: str = "networkidle", timeout: int = 60000, extra_wait_ms: int = 3000, wait_for_selector: Optional[str] = None, wait_for_text: Optional[str] = None):
         if not self.page:
             raise HTTPException(400, "Browser not started. Call POST /start first.")
 
@@ -295,6 +384,10 @@ class BrowserManager:
             await self._ensure_page()
             logger.info("Navigate requested url=%s wait_until=%s timeout=%s", url, wait_until, timeout)
             await self.page.goto(url, wait_until=wait_until, timeout=timeout)
+            if wait_for_selector:
+                await self.page.locator(wait_for_selector).wait_for(state="visible", timeout=timeout)
+            if wait_for_text:
+                await self.page.get_by_text(wait_for_text).wait_for(timeout=timeout)
             if extra_wait_ms > 0:
                 await asyncio.sleep(extra_wait_ms / 1000)
             logger.info("Navigate completed url=%s title=%s", self.page.url, await self.page.title())
@@ -358,6 +451,27 @@ class BrowserManager:
         except Exception as e:
             raise HTTPException(500, f"Get current failed: {str(e)}")
 
+    async def find(self, selector: str, text: Optional[str] = None, limit: int = 20, timeout: int = 30000):
+        if not self.page:
+            raise HTTPException(400, "Browser not started")
+        try:
+            await self._ensure_page()
+            locator = self.page.locator(selector)
+            if text:
+                locator = locator.filter(has_text=text)
+            await locator.first.wait_for(state="attached", timeout=timeout)
+            count = await locator.count()
+            size = min(max(limit, 1), count)
+            items = []
+            for i in range(size):
+                item = locator.nth(i)
+                text_value = await item.text_content()
+                href = await item.get_attribute("href")
+                items.append({"index": i, "text": text_value or "", "href": href})
+            return {"success": True, "count": count, "items": items}
+        except Exception as e:
+            raise HTTPException(500, f"Find failed: {str(e)}")
+
     async def screenshot(self, full_page: bool = True, selector: Optional[str] = None, timeout: int = 60000):
         if not self.page:
             raise HTTPException(400, "Browser not started")
@@ -388,11 +502,18 @@ class BrowserManager:
         except Exception as e:
             raise HTTPException(500, f"Wait failed: {str(e)}")
 
-    async def click(self, selector: str, timeout: int = 10000):
+    async def click(self, selector: str, timeout: int = 10000, text_contains: Optional[str] = None, index: Optional[int] = None):
         if not self.page:
             raise HTTPException(400, "Browser not started")
         await self._ensure_page()
-        await self.page.locator(selector).click(timeout=timeout)
+        locator = self.page.locator(selector)
+        if text_contains:
+            locator = locator.filter(has_text=text_contains)
+        if index is not None:
+            locator = locator.nth(index)
+        else:
+            locator = locator.first
+        await locator.click(timeout=timeout)
         return {"success": True}
 
     async def type(self, selector: str, text: str, timeout: int = 10000, clear_first: bool = True):
@@ -404,6 +525,28 @@ class BrowserManager:
             await locator.fill(text, timeout=timeout)
         else:
             await locator.press_sequentially(text, timeout=timeout)
+        return {"success": True}
+
+    async def fill(self, selector: str, value: str, timeout: int = 10000):
+        if not self.page:
+            raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
+        await self.page.locator(selector).fill(value, timeout=timeout)
+        return {"success": True}
+
+    async def press(self, key: str, modifiers: Optional[list[str]] = None, timeout: int = 10000):
+        if not self.page:
+            raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
+        combo = "+".join([*(modifiers or []), key])
+        await self.page.keyboard.press(combo, timeout=timeout)
+        return {"success": True}
+
+    async def drag(self, source: str, target: str, timeout: int = 10000):
+        if not self.page:
+            raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
+        await self.page.drag_and_drop(source, target, timeout=timeout)
         return {"success": True}
 
     async def scroll(self, direction: str = "down", to_bottom: bool = False, amount: Optional[int] = None):
@@ -548,6 +691,100 @@ class BrowserManager:
             return {"success": True, "path": target_path, "storage_state": storage_state}
         return {"success": True, "path": target_path}
 
+    async def import_storage(self, cookies: Optional[list] = None, local_storage: Optional[dict] = None, url: Optional[str] = None, timeout: int = 30000):
+        if not self.context or not self.page:
+            raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
+        if cookies:
+            await self.context.add_cookies(cookies)
+        if local_storage:
+            if url:
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            await self.page.evaluate(
+                "(items) => { for (const [k, v] of Object.entries(items)) { localStorage.setItem(k, v); } }",
+                local_storage,
+            )
+        return {"success": True}
+
+    async def download_url(self, url: str, path: Optional[str] = None, timeout: int = 60000):
+        if not self.context or not self.page:
+            raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
+        wait_seconds = max(timeout, 1) / 1000
+        try:
+            async with self.page.expect_download(timeout=timeout) as download_info:
+                await self.page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            download = await download_info.value
+            os.makedirs(self.download_dir, exist_ok=True)
+            target_path = os.path.abspath(path or os.path.join(self.download_dir, download.suggested_filename))
+            await asyncio.wait_for(download.save_as(target_path), timeout=wait_seconds)
+            info = {"url": download.url, "path": target_path, "filename": download.suggested_filename}
+            self.last_download = info
+            self.downloads.append(info)
+            return {"success": True, "download": info}
+        except Exception as e:
+            raise HTTPException(500, f"Download failed: {str(e)}")
+
+    async def list_network_requests(self, pattern: Optional[str] = None, limit: int = 100, include_body: bool = False):
+        entries = []
+        regex = None
+        if pattern:
+            try:
+                regex = re.compile(pattern)
+            except re.error:
+                regex = None
+        for req_id in list(self.network_requests):
+            entry = self.network_request_map.get(req_id)
+            if not entry:
+                continue
+            if pattern:
+                url = entry.get("url", "")
+                if regex:
+                    if not regex.search(url):
+                        continue
+                else:
+                    if pattern not in url:
+                        continue
+            item = dict(entry)
+            item.pop("request_object_id", None)
+            if not include_body:
+                item["response_body"] = None
+            entries.append(item)
+        limited = entries[-max(limit, 1):]
+        return {"success": True, "count": len(entries), "items": limited}
+
+    async def get_network_request(self, request_id: str, include_body: bool = False):
+        entry = self.network_request_map.get(request_id)
+        if not entry:
+            raise HTTPException(404, "Request not found")
+        item = dict(entry)
+        item.pop("request_object_id", None)
+        if not include_body:
+            item["response_body"] = None
+        return {"success": True, "request": item}
+
+    async def debug_info(self):
+        status = await self.get_status()
+        pages = []
+        if self.context:
+            for idx, p in enumerate(self.context.pages):
+                t = ""
+                try:
+                    t = await p.title()
+                except Exception:
+                    t = ""
+                pages.append({"id": idx, "url": p.url, "title": t, "current": p is self.page})
+        return {"success": True, "status": status, "pages": pages, "downloads": len(self.downloads)}
+
+    async def debug_snapshot(self, timeout: int = 30000):
+        if not self.page:
+            raise HTTPException(400, "Browser not started")
+        await self._ensure_page()
+        await self.page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        html = await self.page.content()
+        text = await self._retry_if_context_destroyed(lambda: self.page.evaluate("() => document.body.innerText"))
+        return {"success": True, "url": self.page.url, "title": await self.page.title(), "html": html, "text": text or "", "timeout": timeout}
+
     async def get_status(self):
         if not self.context:
             return {"running": False, "url": None, "title": None, "headless": None, "user_data_dir": None}
@@ -576,7 +813,7 @@ class BrowserManager:
             pages.append({"id": idx, "url": p.url, "title": t, "current": p is self.page})
         return {"success": True, "pages": pages}
 
-    async def new_page(self, url: Optional[str] = None, wait_until: str = "networkidle", timeout: int = 60000, extra_wait_ms: int = 3000):
+    async def new_page(self, url: Optional[str] = None, wait_until: str = "networkidle", timeout: int = 60000, extra_wait_ms: int = 3000, wait_for_selector: Optional[str] = None, wait_for_text: Optional[str] = None):
         if not self.context:
             raise HTTPException(400, "Browser not started")
         try:
@@ -591,6 +828,10 @@ class BrowserManager:
         if url:
             try:
                 await p.goto(url, wait_until=wait_until, timeout=timeout)
+                if wait_for_selector:
+                    await p.locator(wait_for_selector).wait_for(state="visible", timeout=timeout)
+                if wait_for_text:
+                    await p.get_by_text(wait_for_text).wait_for(timeout=timeout)
                 if extra_wait_ms > 0:
                     await asyncio.sleep(extra_wait_ms / 1000)
             except Exception as e:
@@ -753,7 +994,8 @@ async def log_requests(request, call_next):
     client = request.client.host if request.client else "-"
     url = str(request.url)
     status_code = 500
-    bypass_queue = request.url.path in {"/", "/health", "/queue/status", "/docs/raw", "/downloads", "/downloads/last"}
+    path = request.url.path
+    bypass_queue = path in {"/", "/health", "/queue/status", "/docs/raw", "/downloads", "/downloads/last", "/debug/info", "/network/requests"} or path.startswith("/network/request/")
     request_id = uuid.uuid4().hex
     enqueue_time = time.time()
     if not bypass_queue:
@@ -840,7 +1082,7 @@ async def stop_browser():
 
 @app.post("/navigate")
 async def navigate(req: NavigateRequest):
-    return await browser_mgr.navigate(url=req.url, wait_until=req.wait_until, timeout=req.timeout, extra_wait_ms=req.extra_wait_ms)
+    return await browser_mgr.navigate(url=req.url, wait_until=req.wait_until, timeout=req.timeout, extra_wait_ms=req.extra_wait_ms, wait_for_selector=req.wait_for_selector, wait_for_text=req.wait_for_text)
 
 
 @app.post("/evaluate")
@@ -856,6 +1098,10 @@ async def get_text(selector: Optional[str] = Query(None), timeout: int = Query(3
 async def get_current(include_html: bool = Query(False), include_text: bool = Query(False), selector: Optional[str] = Query(None), timeout: int = Query(30000)):
     return await browser_mgr.get_current(include_html=include_html, include_text=include_text, selector=selector, timeout=timeout)
 
+@app.get("/find")
+async def find(selector: str = Query(...), text: Optional[str] = Query(None), limit: int = Query(20), timeout: int = Query(30000)):
+    return await browser_mgr.find(selector=selector, text=text, limit=limit, timeout=timeout)
+
 
 @app.post("/screenshot")
 async def screenshot(req: ScreenshotRequest):
@@ -869,12 +1115,24 @@ async def wait_for(req: WaitRequest):
 
 @app.post("/click")
 async def click(req: ClickRequest):
-    return await browser_mgr.click(req.selector, req.timeout)
+    return await browser_mgr.click(req.selector, req.timeout, text_contains=req.text_contains, index=req.index)
 
 
 @app.post("/type")
 async def type_text(req: TypeRequest):
     return await browser_mgr.type(selector=req.selector, text=req.text, timeout=req.timeout, clear_first=req.clear_first)
+
+@app.post("/fill")
+async def fill_text(req: FillRequest):
+    return await browser_mgr.fill(selector=req.selector, value=req.value, timeout=req.timeout)
+
+@app.post("/press")
+async def press_key(req: PressRequest):
+    return await browser_mgr.press(key=req.key, modifiers=req.modifiers, timeout=req.timeout)
+
+@app.post("/drag")
+async def drag(req: DragRequest):
+    return await browser_mgr.drag(source=req.source, target=req.target, timeout=req.timeout)
 
 
 @app.post("/scroll")
@@ -908,6 +1166,10 @@ async def get_last_download():
 @app.post("/download/await")
 async def wait_download(req: DownloadWaitRequest = DownloadWaitRequest()):
     return await browser_mgr.wait_download(timeout=req.timeout)
+
+@app.post("/download")
+async def download(req: DownloadRequest):
+    return await browser_mgr.download_url(url=req.url, path=req.path, timeout=req.timeout)
 
 @app.post("/dialog/await")
 async def wait_dialog(req: DialogWaitRequest = DialogWaitRequest()):
@@ -951,7 +1213,7 @@ async def list_pages():
 
 @app.post("/page/new")
 async def new_page(req: NewPageRequest = NewPageRequest()):
-    return await browser_mgr.new_page(url=req.url, wait_until=req.wait_until, timeout=req.timeout, extra_wait_ms=req.extra_wait_ms)
+    return await browser_mgr.new_page(url=req.url, wait_until=req.wait_until, timeout=req.timeout, extra_wait_ms=req.extra_wait_ms, wait_for_selector=req.wait_for_selector, wait_for_text=req.wait_for_text)
 
 @app.post("/page/switch")
 async def switch_page(req: SwitchPageRequest):
@@ -965,6 +1227,26 @@ async def close_others():
 @app.post("/storage/export")
 async def export_storage(req: StorageExportRequest = StorageExportRequest()):
     return await browser_mgr.export_storage(path=req.path, include_json=req.include_json)
+
+@app.post("/storage/import")
+async def import_storage(req: StorageImportRequest = StorageImportRequest()):
+    return await browser_mgr.import_storage(cookies=req.cookies, local_storage=req.local_storage, url=req.url, timeout=req.timeout)
+
+@app.get("/network/requests")
+async def network_requests(pattern: Optional[str] = Query(None), limit: int = Query(100), include_body: bool = Query(False)):
+    return await browser_mgr.list_network_requests(pattern=pattern, limit=limit, include_body=include_body)
+
+@app.get("/network/request/{request_id}")
+async def network_request(request_id: str, include_body: bool = Query(False)):
+    return await browser_mgr.get_network_request(request_id=request_id, include_body=include_body)
+
+@app.get("/debug/info")
+async def debug_info():
+    return await browser_mgr.debug_info()
+
+@app.get("/debug/snapshot")
+async def debug_snapshot(timeout: int = Query(30000)):
+    return await browser_mgr.debug_snapshot(timeout=timeout)
 
 
 if __name__ == "__main__":
