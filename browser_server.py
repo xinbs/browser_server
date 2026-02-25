@@ -256,6 +256,12 @@ class BrowserManager:
         entry_id = uuid.uuid4().hex
         request_object_id = id(request)
         self.network_request_id_map[request_object_id] = entry_id
+        post_data = None
+        post_data_error = None
+        try:
+            post_data = request.post_data
+        except Exception as e:
+            post_data_error = str(e)
         entry = {
             "id": entry_id,
             "request_object_id": request_object_id,
@@ -263,7 +269,8 @@ class BrowserManager:
             "method": request.method,
             "resource_type": request.resource_type,
             "headers": dict(request.headers),
-            "post_data": request.post_data,
+            "post_data": post_data,
+            "post_data_error": post_data_error,
             "timestamp": time.time(),
             "response_status": None,
             "response_headers": None,
