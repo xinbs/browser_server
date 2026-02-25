@@ -256,19 +256,23 @@ class BrowserManager:
         entry_id = uuid.uuid4().hex
         request_object_id = id(request)
         self.network_request_id_map[request_object_id] = entry_id
+        headers = dict(request.headers)
+        content_type = headers.get("content-type", "")
+        should_capture_post = any(token in content_type for token in ["text", "json", "x-www-form-urlencoded", "xml"])
         post_data = None
         post_data_error = None
-        try:
-            post_data = request.post_data
-        except Exception as e:
-            post_data_error = str(e)
+        if should_capture_post:
+            try:
+                post_data = request.post_data
+            except Exception as e:
+                post_data_error = str(e)
         entry = {
             "id": entry_id,
             "request_object_id": request_object_id,
             "url": request.url,
             "method": request.method,
             "resource_type": request.resource_type,
-            "headers": dict(request.headers),
+            "headers": headers,
             "post_data": post_data,
             "post_data_error": post_data_error,
             "timestamp": time.time(),
