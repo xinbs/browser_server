@@ -7,6 +7,8 @@ import logging
 import time
 import uuid
 import re
+import shutil
+import sys
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -26,6 +28,7 @@ DEFAULT_CHANNEL = os.getenv("BROWSER_CHANNEL") or "chrome"
 DEFAULT_DOWNLOAD_DIR = os.getenv("BROWSER_DOWNLOAD_DIR", os.path.abspath("downloads"))
 LOG_LEVEL = os.getenv("BROWSER_LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.getenv("BROWSER_LOG_FILE", os.path.abspath(os.path.join("logs", "app.log")))
+MCP_CONFIG_PATH = os.path.abspath("mcp_config.json")
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 _formatter = logging.Formatter(fmt="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S %z")
 _formatter.converter = time.localtime
@@ -46,6 +49,28 @@ class StartRequest(BaseModel):
     user_data_dir: Optional[str] = Field(None)
     user_agent: Optional[str] = Field(None)
     channel: Optional[str] = Field(None)
+
+
+class MCPStartRequest(BaseModel):
+    command: Optional[str] = Field("npx")
+    args: Optional[list[str]] = Field(None)
+    timeout_ms: int = Field(15000)
+
+
+class MCPCallRequest(BaseModel):
+    name: str = Field(...)
+    arguments: Optional[dict] = Field(default_factory=dict)
+    timeout_ms: int = Field(30000)
+
+
+class MCPNavigateRequest(BaseModel):
+    url: str = Field(...)
+    timeout_ms: int = Field(30000)
+
+
+class MCPReadRequest(BaseModel):
+    selector: Optional[str] = Field(None)
+    timeout_ms: int = Field(30000)
 
 
 class NavigateRequest(BaseModel):
@@ -365,6 +390,11 @@ class BrowserManager:
             await self.context.close()
         except Exception:
             pass
+        if self.browser:
+            try:
+                await self.browser.close()
+            except Exception:
+                pass
         if self.playwright:
             try:
                 await self.playwright.stop()
@@ -970,7 +1000,435 @@ class BrowserManager:
             raise HTTPException(500, f"CDP DOM attributes failed: {str(e)}")
 
 
+class MCPManager:
+    def __init__(self):
+        self.process: Optional[asyncio.subprocess.Process] = None
+        self._stdout_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
+        self._keepalive_task: Optional[asyncio.Task] = None
+        self._pending: dict[int, asyncio.Future] = {}
+        self._request_id = 0
+        self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
+        self._tools_cache: Optional[list] = None
+        self._initialized = False
+        self._last_start: dict = {}
+        self._last_keepalive_tool_at = 0.0
+
+    def status(self):
+        running = self.process is not None and self.process.returncode is None
+        return {"success": True, "running": running, "initialized": self._initialized, "mode": self._last_start.get("mode"), "wsEndpoint": self._last_start.get("wsEndpoint")}
+
+    async def start(self, command: Optional[str], args: Optional[list[str]], timeout_ms: int = 15000):
+        if self.process and self.process.returncode is None:
+            return {"success": True, "message": "MCP already running"}
+        if not command:
+            raise HTTPException(400, "MCP command is required")
+        arg_list = args or []
+        self._last_start = self._extract_start_info(command, arg_list)
+        logger.info("MCP starting command=%s mode=%s timeout_ms=%s", command, self._last_start.get("mode"), timeout_ms)
+        resolved = shutil.which(command) or command
+        exec_cmd = [resolved]
+        if os.name == "nt":
+            lowered = resolved.lower()
+            if lowered.endswith(".ps1"):
+                exec_cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolved]
+            elif lowered.endswith(".cmd") or lowered.endswith(".bat"):
+                exec_cmd = ["cmd", "/c", resolved]
+        self.process = await asyncio.create_subprocess_exec(
+            *exec_cmd,
+            *arg_list,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        self._pending = {}
+        self._request_id = 0
+        self._tools_cache = None
+        self._initialized = False
+        self._last_keepalive_tool_at = 0.0
+        self._stdout_task = asyncio.create_task(self._read_stdout())
+        self._stderr_task = asyncio.create_task(self._read_stderr())
+        init_result = await self._send_request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "browser_server", "version": "1.0.0"},
+            },
+            timeout_ms=timeout_ms,
+        )
+        await self._send_notification("initialized", {})
+        self._initialized = True
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+        logger.info("MCP started pid=%s mode=%s wsEndpoint=%s", self.process.pid if self.process else None, self._last_start.get("mode"), self._last_start.get("wsEndpoint"))
+        return {"success": True, "message": "MCP started", "initialize": init_result}
+
+    async def ensure_started(self, command: Optional[str] = None, args: Optional[list[str]] = None, timeout_ms: int = 15000):
+        async with self._start_lock:
+            if self.process and self.process.returncode is None and self._initialized:
+                return {"success": True, "message": "MCP already running"}
+            if self.process and self.process.returncode is None and not self._initialized:
+                await self.stop()
+            config = self._load_mcp_config()
+            require_ws = bool(config.get("require_ws"))
+            config_command = config.get("command")
+            command_value = command or (config_command if isinstance(config_command, str) else None) or os.getenv("MCP_COMMAND") or "npx"
+            args_value = args
+            if args_value is None:
+                config_args = config.get("args")
+                if isinstance(config_args, list):
+                    args_value = config_args
+            if args_value is None and require_ws:
+                ws = self._resolve_local_ws_endpoint()
+                if not ws:
+                    raise HTTPException(400, "DevTools wsEndpoint not found. Enable Chrome remote debugging port to avoid consent prompts.")
+                args_value = ["chrome-devtools-mcp@latest", "--wsEndpoint", ws, "--no-usage-statistics"]
+            if args_value is None:
+                channel_override = config.get("channel")
+                args_value = self._default_args(channel_override=channel_override if isinstance(channel_override, str) else None)
+            return await self.start(command_value, args_value, timeout_ms=timeout_ms)
+
+    async def stop(self):
+        if not self.process:
+            return {"success": True, "message": "MCP not running"}
+        logger.info("MCP stopping pid=%s", self.process.pid if self.process else None)
+        if self._stdout_task:
+            self._stdout_task.cancel()
+        if self._stderr_task:
+            self._stderr_task.cancel()
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
+        exit_code = None
+        try:
+            self.process.terminate()
+            await asyncio.wait_for(self.process.wait(), timeout=5)
+            exit_code = self.process.returncode
+        except Exception:
+            try:
+                self.process.kill()
+                await self.process.wait()
+                exit_code = self.process.returncode
+            except Exception:
+                pass
+        self.process = None
+        self._pending = {}
+        self._tools_cache = None
+        self._initialized = False
+        self._last_keepalive_tool_at = 0.0
+        logger.info("MCP stopped exit_code=%s", exit_code)
+        return {"success": True, "message": "MCP stopped"}
+
+    async def _keepalive_loop(self):
+        while True:
+            try:
+                await asyncio.sleep(20)
+                if not self.process or self.process.returncode is not None or not self._initialized:
+                    continue
+                ping_ok = True
+                try:
+                    await self._send_request("ping", {}, timeout_ms=8000)
+                except Exception:
+                    ping_ok = False
+                now = time.time()
+                should_check_tool = (now - self._last_keepalive_tool_at) >= 60
+                if should_check_tool:
+                    self._last_keepalive_tool_at = now
+                    try:
+                        await self._send_request("tools/list", {}, timeout_ms=10000)
+                    except Exception:
+                        ping_ok = False
+                if not ping_ok:
+                    logger.warning("MCP keepalive failed, reconnecting")
+                    await self.reconnect(timeout_ms=15000)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                try:
+                    logger.exception("MCP keepalive loop error, reconnecting")
+                    await self.reconnect(timeout_ms=15000)
+                except Exception:
+                    logger.exception("MCP reconnect failed in keepalive loop")
+                    pass
+
+    def _extract_start_info(self, command: Optional[str], args: list[str]) -> dict:
+        ws_endpoint = None
+        mode = "custom"
+        for i, item in enumerate(args):
+            if item == "--wsEndpoint" and i + 1 < len(args):
+                ws_endpoint = args[i + 1]
+                mode = "wsEndpoint"
+                break
+            if item.startswith("--wsEndpoint="):
+                ws_endpoint = item.split("=", 1)[1]
+                mode = "wsEndpoint"
+                break
+        if mode != "wsEndpoint":
+            for item in args:
+                if item in ("--auto-connect", "--autoConnect"):
+                    mode = "autoConnect"
+                    break
+        return {"command": command, "args": list(args), "mode": mode, "wsEndpoint": ws_endpoint}
+
+    async def reconnect(self, timeout_ms: int = 15000):
+        logger.warning("MCP reconnect requested timeout_ms=%s", timeout_ms)
+        if self.process and self.process.returncode is None:
+            await self.stop()
+        result = await self.ensure_started(timeout_ms=timeout_ms)
+        logger.info("MCP reconnect completed success=%s", result.get("success"))
+        return result
+
+    async def list_tools(self, timeout_ms: int = 30000):
+        result = await self._send_request("tools/list", {}, timeout_ms=timeout_ms)
+        tools = []
+        if isinstance(result, dict):
+            tools = result.get("tools") or []
+        elif isinstance(result, list):
+            tools = result
+        self._tools_cache = tools
+        return {"success": True, "tools": tools}
+
+    async def call_tool(self, name: str, arguments: Optional[dict] = None, timeout_ms: int = 30000):
+        result = await self._send_request("tools/call", {"name": name, "arguments": arguments or {}}, timeout_ms=timeout_ms)
+        return {"success": True, "result": result}
+
+    async def navigate(self, url: str, timeout_ms: int = 30000):
+        tools_response = await self.list_tools(timeout_ms=timeout_ms)
+        tools = tools_response.get("tools") or []
+        names = [t.get("name", "") for t in tools if isinstance(t, dict)]
+        tool_name = None
+        if "navigate_page" in names:
+            tool_name = "navigate_page"
+        else:
+            for name in names:
+                if "navigate" in name:
+                    tool_name = name
+                    break
+        if not tool_name:
+            raise HTTPException(400, "navigate tool not found in MCP server")
+        args = {"type": "url", "url": url} if tool_name == "navigate_page" else {"url": url}
+        return await self.call_tool(tool_name, args, timeout_ms=timeout_ms)
+
+    async def read_text(self, selector: Optional[str] = None, timeout_ms: int = 30000):
+        tools_response = await self.list_tools(timeout_ms=timeout_ms)
+        tools = tools_response.get("tools") or []
+        names = [t.get("name", "") for t in tools if isinstance(t, dict)]
+        primary_result = None
+        text_value = ""
+        if "evaluate_script" in names:
+            function = "(sel) => { const el = sel ? document.querySelector(sel) : document.body; return el ? el.innerText : \"\"; }"
+            args = [selector] if selector is not None else []
+            primary_result = await self.call_tool("evaluate_script", {"function": function, "args": args}, timeout_ms=timeout_ms)
+            if not self._result_has_error(primary_result):
+                text_value = self._extract_text_from_eval_result(primary_result)
+        fallback_result = None
+        if (not text_value) and "take_snapshot" in names:
+            fallback_result = await self.call_tool("take_snapshot", {}, timeout_ms=timeout_ms)
+            if not self._result_has_error(fallback_result):
+                text_value = self._extract_text_from_eval_result(fallback_result)
+        if text_value:
+            return {"success": True, "text": text_value, "length": len(text_value), "raw": {"primary": primary_result, "fallback": fallback_result}}
+        if primary_result is None and fallback_result is None:
+            raise HTTPException(400, "read_text requires evaluate_script or take_snapshot tool")
+        return {"success": True, "text": "", "length": 0, "raw": {"primary": primary_result, "fallback": fallback_result}}
+
+    def _extract_text_from_eval_result(self, result: dict) -> str:
+        if not isinstance(result, dict):
+            return ""
+        target = result
+        if "content" not in target and isinstance(target.get("result"), dict):
+            target = target["result"]
+        content = target.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parsed = self._extract_json_block(item.get("text", ""))
+                    if parsed is None:
+                        return item.get("text", "")
+                    if isinstance(parsed, str):
+                        return parsed
+                    if parsed is not None:
+                        return json.dumps(parsed, ensure_ascii=False)
+        return ""
+
+    def _extract_json_block(self, text: str):
+        if not text:
+            return None
+        match = re.search(r"```json\\s*(.*?)\\s*```", text, re.S)
+        if not match:
+            match = re.search(r"```\\s*(.*?)\\s*```", text, re.S)
+        if not match:
+            return None
+        payload = match.group(1).strip()
+        try:
+            return json.loads(payload)
+        except Exception:
+            return payload
+
+    def _result_has_error(self, result: Optional[dict]) -> bool:
+        if not isinstance(result, dict):
+            return False
+        target = result
+        if isinstance(target.get("result"), dict):
+            target = target["result"]
+        return bool(target.get("isError"))
+
+    def _default_args(self, channel_override: Optional[str] = None) -> list[str]:
+        env_args = os.getenv("MCP_ARGS")
+        if env_args:
+            try:
+                parsed = json.loads(env_args)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                pass
+        ws = self._resolve_local_ws_endpoint()
+        if ws:
+            return ["chrome-devtools-mcp@latest", "--wsEndpoint", ws, "--no-usage-statistics"]
+        channel = channel_override or os.getenv("MCP_CHANNEL", "stable")
+        return ["chrome-devtools-mcp@latest", "--auto-connect", f"--channel={channel}", "--no-usage-statistics"]
+
+    def _load_mcp_config(self) -> dict:
+        if not os.path.exists(MCP_CONFIG_PATH):
+            return {}
+        try:
+            with open(MCP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _resolve_local_ws_endpoint(self) -> Optional[str]:
+        info = self._read_devtools_active_port()
+        if not info:
+            return None
+        port, path = info
+        for host in ["127.0.0.1", "[::1]"]:
+            ws = self._get_cdp_ws_endpoint(host, port)
+            if ws:
+                return ws
+        return f"ws://127.0.0.1:{port}{path}"
+
+    def _get_cdp_ws_endpoint(self, host: str, port: int) -> Optional[str]:
+        url = f"http://{host}:{port}/json/version"
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(data, dict):
+                return None
+            ws = data.get("webSocketDebuggerUrl")
+            if isinstance(ws, str) and ws.startswith("ws://"):
+                return ws
+            browser = data.get("Browser")
+            if isinstance(browser, str) and browser:
+                return f"ws://{host}:{port}/devtools/browser"
+            return None
+        except Exception:
+            return None
+
+    def _is_cdp_http_reachable(self, host: str, port: int) -> bool:
+        return self._get_cdp_ws_endpoint(host, port) is not None
+
+    def _read_devtools_active_port(self) -> Optional[tuple[int, str]]:
+        candidates: list[str] = []
+        configured_dir = os.getenv("BROWSER_USER_DATA_DIR") or DEFAULT_USER_DATA_DIR
+        if configured_dir:
+            candidates.append(os.path.join(configured_dir, "DevToolsActivePort"))
+        base = os.getenv("LOCALAPPDATA")
+        if base:
+            candidates.append(os.path.join(base, "Google", "Chrome", "User Data", "DevToolsActivePort"))
+        seen = set()
+        for path in candidates:
+            norm = os.path.normcase(os.path.abspath(path))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = [line.strip() for line in f.readlines() if line.strip()]
+                if len(lines) < 2:
+                    continue
+                port = int(lines[0])
+                ws_path = lines[1]
+                if not ws_path.startswith("/"):
+                    ws_path = "/" + ws_path
+                return port, ws_path
+            except Exception:
+                continue
+        return None
+
+    async def _send_notification(self, method: str, params: dict):
+        if not self.process or not self.process.stdin:
+            raise HTTPException(400, "MCP not running")
+        payload = {"jsonrpc": "2.0", "method": method, "params": params}
+        data = json.dumps(payload, ensure_ascii=False) + "\n"
+        self.process.stdin.write(data.encode("utf-8"))
+        await self.process.stdin.drain()
+
+    async def _send_request(self, method: str, params: dict, timeout_ms: int = 30000):
+        if not self.process or not self.process.stdin:
+            raise HTTPException(400, "MCP not running")
+        async with self._lock:
+            self._request_id += 1
+            req_id = self._request_id
+            future = asyncio.get_running_loop().create_future()
+            self._pending[req_id] = future
+            payload = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+            data = json.dumps(payload, ensure_ascii=False) + "\n"
+            self.process.stdin.write(data.encode("utf-8"))
+            await self.process.stdin.drain()
+        try:
+            return await asyncio.wait_for(future, timeout=timeout_ms / 1000)
+        except Exception as e:
+            self._pending.pop(req_id, None)
+            logger.warning("MCP request failed method=%s id=%s timeout_ms=%s error=%s", method, req_id, timeout_ms, str(e))
+            raise HTTPException(500, f"MCP request failed: {str(e)}")
+
+    async def _read_stdout(self):
+        if not self.process or not self.process.stdout:
+            return
+        while True:
+            line = await self.process.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="ignore").strip()
+            if not text:
+                continue
+            try:
+                msg = json.loads(text)
+            except Exception:
+                continue
+            msg_id = msg.get("id")
+            if msg_id is None:
+                continue
+            future = self._pending.pop(msg_id, None)
+            if not future:
+                continue
+            if "error" in msg:
+                future.set_exception(RuntimeError(json.dumps(msg["error"], ensure_ascii=False)))
+            else:
+                future.set_result(msg.get("result"))
+        logger.warning("MCP stdout closed pid=%s returncode=%s", self.process.pid if self.process else None, self.process.returncode if self.process else None)
+
+    async def _read_stderr(self):
+        if not self.process or not self.process.stderr:
+            return
+        while True:
+            line = await self.process.stderr.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="ignore").strip()
+            if text:
+                logger.warning("MCP stderr: %s", text)
+        logger.warning("MCP stderr closed pid=%s returncode=%s", self.process.pid if self.process else None, self.process.returncode if self.process else None)
+
+
 browser_mgr = BrowserManager()
+mcp_mgr = MCPManager()
 
 
 @asynccontextmanager
@@ -980,6 +1438,7 @@ async def lifespan(app: FastAPI):
         await browser_mgr.start()
     yield
     logger.info("Service shutdown")
+    await mcp_mgr.stop()
     await browser_mgr.stop()
 
 
@@ -1084,6 +1543,57 @@ async def docs_raw():
 @app.post("/start")
 async def start_browser(req: StartRequest = StartRequest()):
     return await browser_mgr.start(headless=req.headless, user_data_dir=req.user_data_dir, user_agent=req.user_agent, channel=req.channel)
+
+
+@app.post("/mcp/start")
+async def mcp_start(req: MCPStartRequest = MCPStartRequest()):
+    return await mcp_mgr.ensure_started(command=req.command, args=req.args, timeout_ms=req.timeout_ms)
+
+@app.post("/mcp/reconnect")
+async def mcp_reconnect(req: MCPStartRequest = MCPStartRequest()):
+    return await mcp_mgr.reconnect(timeout_ms=req.timeout_ms)
+
+
+@app.post("/mcp/stop")
+async def mcp_stop():
+    return await mcp_mgr.stop()
+
+
+@app.get("/mcp/status")
+async def mcp_status():
+    return mcp_mgr.status()
+
+
+@app.get("/mcp/tools")
+async def mcp_tools(timeout_ms: int = Query(30000)):
+    return await mcp_mgr.list_tools(timeout_ms=timeout_ms)
+
+
+@app.post("/mcp/call")
+async def mcp_call(req: MCPCallRequest):
+    return await mcp_mgr.call_tool(name=req.name, arguments=req.arguments, timeout_ms=req.timeout_ms)
+
+
+@app.post("/mcp/navigate")
+async def mcp_navigate(req: MCPNavigateRequest):
+    return await mcp_mgr.navigate(url=req.url, timeout_ms=req.timeout_ms)
+
+
+@app.post("/mcp/open")
+async def mcp_open(req: MCPNavigateRequest):
+    await mcp_mgr.ensure_started(timeout_ms=req.timeout_ms)
+    try:
+        return await mcp_mgr.navigate(url=req.url, timeout_ms=req.timeout_ms)
+    except HTTPException as e:
+        if e.status_code == 500 and isinstance(e.detail, str) and "MCP request failed" in e.detail:
+            await mcp_mgr.reconnect(timeout_ms=req.timeout_ms)
+            return await mcp_mgr.navigate(url=req.url, timeout_ms=req.timeout_ms)
+        raise
+
+
+@app.post("/mcp/read")
+async def mcp_read(req: MCPReadRequest):
+    return await mcp_mgr.read_text(selector=req.selector, timeout_ms=req.timeout_ms)
 
 
 @app.post("/stop")

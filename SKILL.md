@@ -60,6 +60,56 @@ user_data_dir can be omitted to use the project default (./user_data). Use a cus
 }
 ```
 
+### Start MCP (Chrome DevTools MCP server)
+
+If omitted, MCP resolves a local wsEndpoint automatically from DevToolsActivePort.
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/start",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {}
+  }
+}
+```
+
+### Open page via MCP (auto-start)
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/open",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "url": "https://example.com",
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+### Read page text via MCP (auto-start)
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/read",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "selector": "body",
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
 ### Navigate
 
 ```json

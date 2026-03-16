@@ -142,6 +142,46 @@ curl -s "$base/queue/status"
 curl -s "$base/docs/raw"
 ```
 
+## MCP (Chrome DevTools) 快速使用
+
+当页面被反爬拦截时，可用 MCP 复用已开启远程调试的 Chrome 会话。
+
+### 环境变量
+
+- MCP_COMMAND: 默认 `npx`
+- MCP_ARGS: JSON 数组字符串，优先级最高（例：`["chrome-devtools-mcp@latest","--wsEndpoint","ws://127.0.0.1:9222/devtools/browser/xxx","--no-usage-statistics"]`）
+- MCP_CHANNEL: 当无法从本机 DevToolsActivePort 推导 wsEndpoint 时的 auto-connect channel（默认 `stable`）
+
+### PowerShell
+
+```powershell
+$base = "http://localhost:3456"
+
+# 1) 启动 MCP（可省略，/mcp/open 会自动启动）
+Invoke-RestMethod -Uri "$base/mcp/start" -Method POST -ContentType "application/json" -Body "{}"
+
+# 2) 打开页面（自动 ensure MCP 已启动）
+Invoke-RestMethod -Uri "$base/mcp/open" -Method POST -ContentType "application/json" -Body '{"url":"https://example.com","timeout_ms":30000}'
+
+# 3) 读取文本（自动 ensure MCP 已启动）
+Invoke-RestMethod -Uri "$base/mcp/read" -Method POST -ContentType "application/json" -Body '{"selector":"body","timeout_ms":30000}'
+```
+
+### curl
+
+```bash
+base="http://localhost:3456"
+
+# 1) 启动 MCP（可省略）
+curl -s "$base/mcp/start" -X POST -H "Content-Type: application/json" -d "{}"
+
+# 2) 打开页面
+curl -s "$base/mcp/open" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com","timeout_ms":30000}'
+
+# 3) 读取文本
+curl -s "$base/mcp/read" -X POST -H "Content-Type: application/json" -d '{"selector":"body","timeout_ms":30000}'
+```
+
 ### GET /
 
 Service info and current browser status.
@@ -212,6 +252,14 @@ curl -s "$base/docs/raw"
 - /health
 - /queue/status
 - /docs/raw
+- /mcp/start
+- /mcp/stop
+- /mcp/status
+- /mcp/tools
+- /mcp/call
+- /mcp/navigate
+- /mcp/open
+- /mcp/read
 - /downloads
 - /downloads/last
 - /debug/info
@@ -263,6 +311,161 @@ Example:
 
 ```bash
 curl -s "$base/stop" -X POST
+```
+
+### POST /mcp/start
+
+Start MCP (Chrome DevTools MCP server). If args is omitted, the server attempts to resolve a local wsEndpoint automatically.
+
+Body:
+
+- command: string, optional, default `npx`
+- args: array, optional
+- timeout_ms: number, default `15000`
+
+Response:
+
+- success
+- message
+- initialize
+
+Example:
+
+```bash
+curl -s "$base/mcp/start" -X POST -H "Content-Type: application/json" -d '{}'
+```
+
+### POST /mcp/stop
+
+Stop MCP process.
+
+Response:
+
+- success
+- message
+
+Example:
+
+```bash
+curl -s "$base/mcp/stop" -X POST
+```
+
+### GET /mcp/status
+
+Get MCP running status.
+
+Response:
+
+- success
+- running
+- initialized
+
+Example:
+
+```bash
+curl -s "$base/mcp/status"
+```
+
+### GET /mcp/tools
+
+List MCP tools.
+
+Query:
+
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- tools
+
+Example:
+
+```bash
+curl -s "$base/mcp/tools"
+```
+
+### POST /mcp/call
+
+Call MCP tool.
+
+Body:
+
+- name: string, required
+- arguments: object, optional
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- result
+
+Example:
+
+```bash
+curl -s "$base/mcp/call" -X POST -H "Content-Type: application/json" -d '{"name":"take_snapshot","arguments":{}}'
+```
+
+### POST /mcp/navigate
+
+Navigate via MCP.
+
+Body:
+
+- url: string, required
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- result
+
+Example:
+
+```bash
+curl -s "$base/mcp/navigate" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com","timeout_ms":30000}'
+```
+
+### POST /mcp/open
+
+Navigate via MCP with auto-start. If MCP is not running, it will be started automatically.
+
+Body:
+
+- url: string, required
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- result
+
+Example:
+
+```bash
+curl -s "$base/mcp/open" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com","timeout_ms":30000}'
+```
+
+### POST /mcp/read
+
+Read page text via MCP with auto-start. If MCP is not running, it will be started automatically.
+
+Body:
+
+- selector: string, optional
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- text
+- length
+- raw
+
+Example:
+
+```bash
+curl -s "$base/mcp/read" -X POST -H "Content-Type: application/json" -d '{"selector":"body","timeout_ms":30000}'
 ```
 
 ### POST /navigate

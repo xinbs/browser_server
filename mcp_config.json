@@ -1,0 +1,9 @@
+{
+  "command": "npx",
+  "args": [
+    "chrome-devtools-mcp@latest",
+    "--auto-connect",
+    "--channel=stable",
+    "--no-usage-statistics"
+  ]
+}
