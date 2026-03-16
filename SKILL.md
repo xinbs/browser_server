@@ -110,6 +110,189 @@ If omitted, MCP resolves a local wsEndpoint automatically from DevToolsActivePor
 }
 ```
 
+### Call any native MCP tool (auto-start)
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/call",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "name": "take_snapshot",
+      "arguments": {},
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+### Call MCP tool by path (auto-start)
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/tool/list_pages",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "arguments": {},
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+### Batch call MCP tools
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/call/batch",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "calls": [
+        { "name": "list_pages", "arguments": {} },
+        { "name": "take_snapshot", "arguments": {} }
+      ],
+      "timeout_ms": 30000,
+      "stop_on_error": true
+    }
+  }
+}
+```
+
+### List MCP network requests
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/network/requests?page_size=50&page_idx=0&timeout_ms=30000",
+    "method": "GET"
+  }
+}
+```
+
+### Get MCP network request detail
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/network/request?reqid=1&timeout_ms=30000",
+    "method": "GET"
+  }
+}
+```
+
+### List MCP console messages
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/console/messages?page_size=50&page_idx=0&timeout_ms=30000",
+    "method": "GET"
+  }
+}
+```
+
+### MCP web wait (selector or text)
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/web/wait",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "selector": "input[name='q']",
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+### MCP web click by CSS selector
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/web/click",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "selector": "button[type='submit']",
+      "index": 0,
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+### MCP web type and optional submit key
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/web/type",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "selector": "input[name='q']",
+      "text": "openclawd",
+      "clear_first": true,
+      "submit_key": "Enter",
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+### MCP web scroll
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/web/scroll",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "x": 0,
+      "y": 800,
+      "behavior": "smooth",
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+### MCP web read HTML
+
+```json
+{
+  "tool": "fetch",
+  "params": {
+    "url": "${BROWSER_SERVER_URL}/mcp/web/html",
+    "method": "POST",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "selector": "main",
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
 ### Navigate
 
 ```json

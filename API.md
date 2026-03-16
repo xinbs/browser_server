@@ -165,6 +165,12 @@ Invoke-RestMethod -Uri "$base/mcp/open" -Method POST -ContentType "application/j
 
 # 3) 读取文本（自动 ensure MCP 已启动）
 Invoke-RestMethod -Uri "$base/mcp/read" -Method POST -ContentType "application/json" -Body '{"selector":"body","timeout_ms":30000}'
+
+# 4) 通用 MCP tool 调用（自动 ensure MCP 已启动）
+Invoke-RestMethod -Uri "$base/mcp/call" -Method POST -ContentType "application/json" -Body '{"name":"take_snapshot","arguments":{},"timeout_ms":30000}'
+
+# 5) 常用网页点击（CSS 选择器）
+Invoke-RestMethod -Uri "$base/mcp/web/click" -Method POST -ContentType "application/json" -Body '{"selector":"button[type=''submit'']","index":0,"timeout_ms":30000}'
 ```
 
 ### curl
@@ -180,6 +186,12 @@ curl -s "$base/mcp/open" -X POST -H "Content-Type: application/json" -d '{"url":
 
 # 3) 读取文本
 curl -s "$base/mcp/read" -X POST -H "Content-Type: application/json" -d '{"selector":"body","timeout_ms":30000}'
+
+# 4) 通用 MCP tool 调用
+curl -s "$base/mcp/call" -X POST -H "Content-Type: application/json" -d '{"name":"take_snapshot","arguments":{},"timeout_ms":30000}'
+
+# 5) 常用网页输入 + 回车
+curl -s "$base/mcp/web/type" -X POST -H "Content-Type: application/json" -d '{"selector":"input[name=\"q\"]","text":"openclawd","clear_first":true,"submit_key":"Enter","timeout_ms":30000}'
 ```
 
 ### GET /
@@ -257,9 +269,19 @@ curl -s "$base/docs/raw"
 - /mcp/status
 - /mcp/tools
 - /mcp/call
+- /mcp/tool/{tool_name}
+- /mcp/call/batch
 - /mcp/navigate
 - /mcp/open
 - /mcp/read
+- /mcp/network/requests
+- /mcp/network/request
+- /mcp/console/messages
+- /mcp/web/wait
+- /mcp/web/click
+- /mcp/web/type
+- /mcp/web/scroll
+- /mcp/web/html
 - /downloads
 - /downloads/last
 - /debug/info
@@ -406,6 +428,47 @@ Example:
 curl -s "$base/mcp/call" -X POST -H "Content-Type: application/json" -d '{"name":"take_snapshot","arguments":{}}'
 ```
 
+### POST /mcp/tool/{tool_name}
+
+Call MCP tool via path parameter. This is useful for directly exposing native MCP tool names.
+
+Body:
+
+- arguments: object, optional
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- result
+
+Example:
+
+```bash
+curl -s "$base/mcp/tool/list_pages" -X POST -H "Content-Type: application/json" -d '{"arguments":{},"timeout_ms":30000}'
+```
+
+### POST /mcp/call/batch
+
+Batch call MCP tools in order.
+
+Body:
+
+- calls: array, required (`[{ "name": "...", "arguments": {} }]`)
+- timeout_ms: number, default `30000`
+- stop_on_error: boolean, default `true`
+
+Response:
+
+- success
+- results
+
+Example:
+
+```bash
+curl -s "$base/mcp/call/batch" -X POST -H "Content-Type: application/json" -d '{"calls":[{"name":"list_pages","arguments":{}},{"name":"take_snapshot","arguments":{}}],"timeout_ms":30000,"stop_on_error":true}'
+```
+
 ### POST /mcp/navigate
 
 Navigate via MCP.
@@ -466,6 +529,185 @@ Example:
 
 ```bash
 curl -s "$base/mcp/read" -X POST -H "Content-Type: application/json" -d '{"selector":"body","timeout_ms":30000}'
+```
+
+### GET /mcp/network/requests
+
+List network requests from MCP DevTools context.
+
+Query:
+
+- page_size: number, optional
+- page_idx: number, optional
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- result
+
+Example:
+
+```bash
+curl -s "$base/mcp/network/requests?page_size=50&page_idx=0&timeout_ms=30000"
+```
+
+### GET /mcp/network/request
+
+Get one network request detail from MCP DevTools context.
+
+Query:
+
+- reqid: number, optional
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- result
+
+Example:
+
+```bash
+curl -s "$base/mcp/network/request?reqid=1&timeout_ms=30000"
+```
+
+### GET /mcp/console/messages
+
+List console messages from MCP DevTools context.
+
+Query:
+
+- page_size: number, optional
+- page_idx: number, optional
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- result
+
+Example:
+
+```bash
+curl -s "$base/mcp/console/messages?page_size=50&page_idx=0&timeout_ms=30000"
+```
+
+### POST /mcp/web/wait
+
+Wait until selector exists or page contains text (MCP evaluate_script based).
+
+Body:
+
+- selector: string, optional
+- text: string, optional
+- timeout_ms: number, default `30000`
+- poll_interval_ms: number, default `300`
+
+Response:
+
+- success
+- matched
+- selector
+- text
+
+Example:
+
+```bash
+curl -s "$base/mcp/web/wait" -X POST -H "Content-Type: application/json" -d '{"selector":"input[name=\"q\"]","timeout_ms":30000}'
+```
+
+### POST /mcp/web/click
+
+Click element by CSS selector (MCP evaluate_script based).
+
+Body:
+
+- selector: string, required
+- index: number, default `0`
+- timeout_ms: number, default `30000`
+- poll_interval_ms: number, default `300`
+
+Response:
+
+- success
+- selector
+- index
+- raw
+
+Example:
+
+```bash
+curl -s "$base/mcp/web/click" -X POST -H "Content-Type: application/json" -d '{"selector":"button[type=\"submit\"]","index":0,"timeout_ms":30000}'
+```
+
+### POST /mcp/web/type
+
+Type text into element by CSS selector, optionally submit key.
+
+Body:
+
+- selector: string, required
+- text: string, required
+- clear_first: boolean, default `true`
+- submit_key: string, optional (e.g. `Enter`)
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- selector
+- length
+- submitted
+
+Example:
+
+```bash
+curl -s "$base/mcp/web/type" -X POST -H "Content-Type: application/json" -d '{"selector":"input[name=\"q\"]","text":"openclawd","clear_first":true,"submit_key":"Enter","timeout_ms":30000}'
+```
+
+### POST /mcp/web/scroll
+
+Scroll viewport by x/y delta.
+
+Body:
+
+- x: number, default `0`
+- y: number, default `600`
+- behavior: string, default `auto` (`auto`/`smooth`)
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- result
+
+Example:
+
+```bash
+curl -s "$base/mcp/web/scroll" -X POST -H "Content-Type: application/json" -d '{"x":0,"y":800,"behavior":"smooth","timeout_ms":30000}'
+```
+
+### POST /mcp/web/html
+
+Read outerHTML by selector. If selector is omitted, returns full document HTML.
+
+Body:
+
+- selector: string, optional
+- timeout_ms: number, default `30000`
+
+Response:
+
+- success
+- html
+- length
+- selector
+
+Example:
+
+```bash
+curl -s "$base/mcp/web/html" -X POST -H "Content-Type: application/json" -d '{"selector":"main","timeout_ms":30000}'
 ```
 
 ### POST /navigate

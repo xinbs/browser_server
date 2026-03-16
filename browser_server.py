@@ -63,12 +63,62 @@ class MCPCallRequest(BaseModel):
     timeout_ms: int = Field(30000)
 
 
+class MCPToolInvokeRequest(BaseModel):
+    arguments: Optional[dict] = Field(default_factory=dict)
+    timeout_ms: int = Field(30000)
+
+
+class MCPBatchCallItem(BaseModel):
+    name: str = Field(...)
+    arguments: Optional[dict] = Field(default_factory=dict)
+
+
+class MCPBatchCallRequest(BaseModel):
+    calls: list[MCPBatchCallItem] = Field(...)
+    timeout_ms: int = Field(30000)
+    stop_on_error: bool = Field(True)
+
+
 class MCPNavigateRequest(BaseModel):
     url: str = Field(...)
     timeout_ms: int = Field(30000)
 
 
 class MCPReadRequest(BaseModel):
+    selector: Optional[str] = Field(None)
+    timeout_ms: int = Field(30000)
+
+
+class MCPWebWaitRequest(BaseModel):
+    selector: Optional[str] = Field(None)
+    text: Optional[str] = Field(None)
+    timeout_ms: int = Field(30000)
+    poll_interval_ms: int = Field(300)
+
+
+class MCPWebClickRequest(BaseModel):
+    selector: str = Field(...)
+    index: int = Field(0)
+    timeout_ms: int = Field(30000)
+    poll_interval_ms: int = Field(300)
+
+
+class MCPWebTypeRequest(BaseModel):
+    selector: str = Field(...)
+    text: str = Field(...)
+    clear_first: bool = Field(True)
+    submit_key: Optional[str] = Field(None)
+    timeout_ms: int = Field(30000)
+
+
+class MCPWebScrollRequest(BaseModel):
+    x: int = Field(0)
+    y: int = Field(600)
+    behavior: str = Field("auto")
+    timeout_ms: int = Field(30000)
+
+
+class MCPWebHtmlRequest(BaseModel):
     selector: Optional[str] = Field(None)
     timeout_ms: int = Field(30000)
 
@@ -1465,7 +1515,7 @@ async def log_requests(request, call_next):
     url = str(request.url)
     status_code = 500
     path = request.url.path
-    bypass_queue = path in {"/", "/health", "/queue/status", "/docs/raw", "/downloads", "/downloads/last", "/debug/info", "/network/requests"} or path.startswith("/network/request/")
+    bypass_queue = path in {"/", "/health", "/queue/status", "/docs/raw", "/downloads", "/downloads/last", "/debug/info", "/network/requests"} or path.startswith("/network/request/") or path.startswith("/mcp/")
     request_id = uuid.uuid4().hex
     enqueue_time = time.time()
     if not bypass_queue:
@@ -1569,9 +1619,84 @@ async def mcp_tools(timeout_ms: int = Query(30000)):
     return await mcp_mgr.list_tools(timeout_ms=timeout_ms)
 
 
+async def _mcp_call_with_reconnect(name: str, arguments: Optional[dict] = None, timeout_ms: int = 30000):
+    await mcp_mgr.ensure_started(timeout_ms=timeout_ms)
+    try:
+        return await mcp_mgr.call_tool(name=name, arguments=arguments, timeout_ms=timeout_ms)
+    except HTTPException as e:
+        if e.status_code == 500 and isinstance(e.detail, str) and "MCP request failed" in e.detail:
+            await mcp_mgr.reconnect(timeout_ms=timeout_ms)
+            return await mcp_mgr.call_tool(name=name, arguments=arguments, timeout_ms=timeout_ms)
+        raise
+
+
+def _mcp_extract_content_text(result: Optional[dict]) -> str:
+    if not isinstance(result, dict):
+        return ""
+    payload = result.get("result")
+    if isinstance(payload, dict):
+        content = payload.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        return text
+    return ""
+
+
+def _mcp_extract_value(result: Optional[dict]):
+    text = _mcp_extract_content_text(result)
+    if not text:
+        return None
+    match = re.search(r"```json\s*(.*?)\s*```", text, re.S)
+    if not match:
+        match = re.search(r"```\s*(.*?)\s*```", text, re.S)
+    if match:
+        payload = match.group(1).strip()
+        try:
+            return json.loads(payload)
+        except Exception:
+            return payload
+    try:
+        return json.loads(text)
+    except Exception:
+        return text
+
+
+async def _mcp_eval(function: str, args: Optional[list] = None, timeout_ms: int = 30000):
+    return await _mcp_call_with_reconnect(
+        name="evaluate_script",
+        arguments={"function": function, "args": args or []},
+        timeout_ms=timeout_ms,
+    )
+
+
 @app.post("/mcp/call")
 async def mcp_call(req: MCPCallRequest):
-    return await mcp_mgr.call_tool(name=req.name, arguments=req.arguments, timeout_ms=req.timeout_ms)
+    return await _mcp_call_with_reconnect(name=req.name, arguments=req.arguments, timeout_ms=req.timeout_ms)
+
+
+@app.post("/mcp/tool/{tool_name}")
+async def mcp_call_tool_by_path(tool_name: str, req: MCPToolInvokeRequest = MCPToolInvokeRequest()):
+    return await _mcp_call_with_reconnect(name=tool_name, arguments=req.arguments, timeout_ms=req.timeout_ms)
+
+
+@app.post("/mcp/call/batch")
+async def mcp_call_batch(req: MCPBatchCallRequest):
+    if not req.calls:
+        raise HTTPException(400, "calls is required")
+    await mcp_mgr.ensure_started(timeout_ms=req.timeout_ms)
+    results = []
+    for idx, item in enumerate(req.calls):
+        try:
+            result = await _mcp_call_with_reconnect(name=item.name, arguments=item.arguments, timeout_ms=req.timeout_ms)
+            results.append({"index": idx, "name": item.name, "success": True, "result": result.get("result")})
+        except HTTPException as e:
+            results.append({"index": idx, "name": item.name, "success": False, "error": e.detail})
+            if req.stop_on_error:
+                break
+    return {"success": all(x.get("success") for x in results), "results": results}
 
 
 @app.post("/mcp/navigate")
@@ -1594,6 +1719,112 @@ async def mcp_open(req: MCPNavigateRequest):
 @app.post("/mcp/read")
 async def mcp_read(req: MCPReadRequest):
     return await mcp_mgr.read_text(selector=req.selector, timeout_ms=req.timeout_ms)
+
+
+@app.get("/mcp/network/requests")
+async def mcp_network_requests(page_size: Optional[int] = Query(None), page_idx: Optional[int] = Query(None), timeout_ms: int = Query(30000)):
+    arguments = {}
+    if page_size is not None:
+        arguments["pageSize"] = page_size
+    if page_idx is not None:
+        arguments["pageIdx"] = page_idx
+    return await _mcp_call_with_reconnect(name="list_network_requests", arguments=arguments, timeout_ms=timeout_ms)
+
+
+@app.get("/mcp/network/request")
+async def mcp_network_request(reqid: Optional[int] = Query(None), timeout_ms: int = Query(30000)):
+    arguments = {}
+    if reqid is not None:
+        arguments["reqid"] = reqid
+    return await _mcp_call_with_reconnect(name="get_network_request", arguments=arguments, timeout_ms=timeout_ms)
+
+
+@app.get("/mcp/console/messages")
+async def mcp_console_messages(page_size: Optional[int] = Query(None), page_idx: Optional[int] = Query(None), timeout_ms: int = Query(30000)):
+    arguments = {}
+    if page_size is not None:
+        arguments["pageSize"] = page_size
+    if page_idx is not None:
+        arguments["pageIdx"] = page_idx
+    return await _mcp_call_with_reconnect(name="list_console_messages", arguments=arguments, timeout_ms=timeout_ms)
+
+
+@app.post("/mcp/web/wait")
+async def mcp_web_wait(req: MCPWebWaitRequest):
+    deadline = time.time() + max(req.timeout_ms, 1) / 1000
+    interval = max(req.poll_interval_ms, 50) / 1000
+    selector_js = json.dumps(req.selector or "")
+    text_js = json.dumps(req.text or "")
+    script = f"() => {{ const sel = {selector_js}; const txt = {text_js}; if (sel) {{ const el = document.querySelector(sel); if (!el) return false; if (!txt) return true; const v = (el.innerText || el.textContent || '').trim(); return v.includes(txt); }} if (txt) {{ const body = (document.body && (document.body.innerText || document.body.textContent)) || ''; return body.includes(txt); }} return document.readyState === 'complete'; }}"
+    while time.time() < deadline:
+        try:
+            result = await _mcp_eval(script, timeout_ms=min(req.timeout_ms, 10000))
+        except HTTPException as e:
+            if e.status_code == 500 and isinstance(e.detail, str) and "MCP request failed" in e.detail:
+                await asyncio.sleep(interval)
+                continue
+            raise
+        value = _mcp_extract_value(result)
+        normalized = value.strip().lower() if isinstance(value, str) else None
+        if req.selector or req.text:
+            matched = value is True or normalized == "true"
+        else:
+            matched = value is True or normalized in {"true", "complete", "interactive"}
+        if matched:
+            return {"success": True, "selector": req.selector, "text": req.text, "matched": True}
+        await asyncio.sleep(interval)
+    return {"success": False, "selector": req.selector, "text": req.text, "matched": False}
+
+
+@app.post("/mcp/web/click")
+async def mcp_web_click(req: MCPWebClickRequest):
+    wait_result = await mcp_web_wait(MCPWebWaitRequest(selector=req.selector, timeout_ms=req.timeout_ms, poll_interval_ms=req.poll_interval_ms))
+    if not wait_result.get("matched"):
+        raise HTTPException(408, f"Element not found: {req.selector}")
+    selector_js = json.dumps(req.selector)
+    script = f"() => {{ const sel = {selector_js}; const idx = {int(req.index)}; const nodes = document.querySelectorAll(sel); if (!nodes || nodes.length <= idx) return {{ ok:false, reason:'not_found', count:nodes ? nodes.length : 0 }}; const el = nodes[idx]; el.scrollIntoView({{block:'center', inline:'center'}}); el.click(); return {{ ok:true, count:nodes.length }}; }}"
+    result = await _mcp_eval(script, timeout_ms=req.timeout_ms)
+    value = _mcp_extract_value(result)
+    if isinstance(value, dict) and value.get("ok"):
+        return {"success": True, "selector": req.selector, "index": req.index, "raw": value}
+    raise HTTPException(500, f"MCP click failed for selector: {req.selector}")
+
+
+@app.post("/mcp/web/type")
+async def mcp_web_type(req: MCPWebTypeRequest):
+    wait_result = await mcp_web_wait(MCPWebWaitRequest(selector=req.selector, timeout_ms=req.timeout_ms))
+    if not wait_result.get("matched"):
+        raise HTTPException(408, f"Element not found: {req.selector}")
+    selector_js = json.dumps(req.selector)
+    text_js = json.dumps(req.text)
+    clear_js = "true" if req.clear_first else "false"
+    script = f"() => {{ const sel = {selector_js}; const val = {text_js}; const clearFirst = {clear_js}; const el = document.querySelector(sel); if (!el) return {{ ok:false, reason:'not_found' }}; const prev = (el.value ?? ''); const next = clearFirst ? val : (String(prev) + String(val)); el.focus(); el.value = next; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return {{ ok:true, length: String(next).length }}; }}"
+    result = await _mcp_eval(script, timeout_ms=req.timeout_ms)
+    value = _mcp_extract_value(result)
+    if not (isinstance(value, dict) and value.get("ok")):
+        raise HTTPException(500, f"MCP type failed for selector: {req.selector}")
+    if req.submit_key:
+        await _mcp_call_with_reconnect(name="press_key", arguments={"key": req.submit_key}, timeout_ms=req.timeout_ms)
+    return {"success": True, "selector": req.selector, "length": value.get("length"), "submitted": bool(req.submit_key)}
+
+
+@app.post("/mcp/web/scroll")
+async def mcp_web_scroll(req: MCPWebScrollRequest):
+    behavior_js = json.dumps(req.behavior or "auto")
+    script = f"() => {{ window.scrollBy({{ left: {int(req.x)}, top: {int(req.y)}, behavior: {behavior_js} || 'auto' }}); return {{ ok:true, x: window.scrollX, y: window.scrollY }}; }}"
+    result = await _mcp_eval(script, timeout_ms=req.timeout_ms)
+    value = _mcp_extract_value(result)
+    return {"success": True, "result": value}
+
+
+@app.post("/mcp/web/html")
+async def mcp_web_html(req: MCPWebHtmlRequest):
+    selector_js = json.dumps(req.selector or "")
+    script = f"() => {{ const sel = {selector_js}; const el = sel ? document.querySelector(sel) : document.documentElement; return el ? el.outerHTML : ''; }}"
+    result = await _mcp_eval(script, timeout_ms=req.timeout_ms)
+    value = _mcp_extract_value(result)
+    text = value if isinstance(value, str) else ""
+    return {"success": True, "html": text, "length": len(text), "selector": req.selector}
 
 
 @app.post("/stop")
