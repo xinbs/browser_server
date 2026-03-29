@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import importlib
 import os
 import json
 import urllib.request
@@ -8,6 +9,7 @@ import time
 import uuid
 import re
 import shutil
+import site
 import sys
 from collections import deque
 from contextlib import asynccontextmanager
@@ -24,6 +26,9 @@ PORT = int(os.getenv("BROWSER_PORT", "3456"))
 DEFAULT_USER_DATA_DIR = os.getenv("BROWSER_USER_DATA_DIR", os.path.abspath("user_data"))
 DEFAULT_HEADLESS = os.getenv("BROWSER_HEADLESS", "true").lower() in {"1", "true", "yes", "y"}
 AUTO_START = os.getenv("BROWSER_AUTO_START", "true").lower() in {"1", "true", "yes", "y"}
+DEFAULT_ENGINE = (os.getenv("BROWSER_ENGINE") or "playwright").strip().lower()
+if DEFAULT_ENGINE not in {"playwright", "patchright"}:
+    DEFAULT_ENGINE = "playwright"
 DEFAULT_CHANNEL = os.getenv("BROWSER_CHANNEL") or "chrome"
 DEFAULT_DOWNLOAD_DIR = os.getenv("BROWSER_DOWNLOAD_DIR", os.path.abspath("downloads"))
 LOG_LEVEL = os.getenv("BROWSER_LOG_LEVEL", "INFO").upper()
@@ -49,6 +54,7 @@ class StartRequest(BaseModel):
     user_data_dir: Optional[str] = Field(None)
     user_agent: Optional[str] = Field(None)
     channel: Optional[str] = Field(None)
+    engine: Optional[str] = Field(None)
 
 
 class MCPStartRequest(BaseModel):
@@ -259,6 +265,7 @@ class BrowserManager:
         self.page: Optional[Page] = None
         self.user_data_dir: Optional[str] = None
         self.headless: Optional[bool] = None
+        self.engine: Optional[str] = None
         self.download_dir: str = DEFAULT_DOWNLOAD_DIR
         self.downloads: list[dict] = []
         self.last_download: Optional[dict] = None
@@ -376,11 +383,43 @@ class BrowserManager:
             except Exception:
                 entry["response_body"] = None
         self.network_request_id_map.pop(request_object_id, None)
-    async def start(self, headless: Optional[bool] = None, user_data_dir: Optional[str] = None, user_agent: Optional[str] = None, channel: Optional[str] = None):
+    async def _create_playwright_runtime(self, engine: str):
+        if engine == "playwright":
+            return await async_playwright().start()
+        try:
+            module = importlib.import_module("patchright.async_api")
+            factory = getattr(module, "async_playwright")
+            return await factory().start()
+        except ModuleNotFoundError:
+            user_site_paths: list[str] = []
+            try:
+                candidate = site.getusersitepackages()
+                if isinstance(candidate, str):
+                    user_site_paths = [candidate]
+                elif isinstance(candidate, list):
+                    user_site_paths = [p for p in candidate if isinstance(p, str)]
+            except Exception:
+                user_site_paths = []
+            for path in user_site_paths:
+                if path and os.path.isdir(path) and path not in sys.path:
+                    sys.path.append(path)
+            try:
+                module = importlib.import_module("patchright.async_api")
+                factory = getattr(module, "async_playwright")
+                return await factory().start()
+            except Exception as e:
+                raise HTTPException(400, f"Patchright unavailable in current Python runtime ({sys.executable}): {str(e)}")
+        except Exception as e:
+            raise HTTPException(400, f"Patchright runtime init failed: {str(e)}")
+
+    async def start(self, headless: Optional[bool] = None, user_data_dir: Optional[str] = None, user_agent: Optional[str] = None, channel: Optional[str] = None, engine: Optional[str] = None):
         if self.context:
             return {"success": True, "message": "Browser already running"}
+        launch_engine = (engine or DEFAULT_ENGINE).strip().lower()
+        if launch_engine not in {"playwright", "patchright"}:
+            raise HTTPException(400, "Invalid engine, expected one of: playwright, patchright")
 
-        self.playwright = await async_playwright().start()
+        self.playwright = await self._create_playwright_runtime(launch_engine)
 
         launch_headless = DEFAULT_HEADLESS if headless is None else headless
         launch_user_data_dir = os.path.abspath(user_data_dir or DEFAULT_USER_DATA_DIR)
@@ -414,7 +453,32 @@ class BrowserManager:
         }
         if launch_channel:
             launch_kwargs["channel"] = launch_channel
-        self.context = await self.playwright.chromium.launch_persistent_context(**launch_kwargs)
+        try:
+            self.context = await self.playwright.chromium.launch_persistent_context(**launch_kwargs)
+        except Exception as e:
+            if launch_engine == "patchright" and "channel" in launch_kwargs:
+                retry_kwargs = dict(launch_kwargs)
+                retry_kwargs.pop("channel", None)
+                try:
+                    logger.warning("Patchright launch with channel failed, retrying without channel: %s", e)
+                    self.context = await self.playwright.chromium.launch_persistent_context(**retry_kwargs)
+                    launch_channel = None
+                except Exception as retry_error:
+                    if self.playwright:
+                        try:
+                            await self.playwright.stop()
+                        except Exception:
+                            pass
+                    self.playwright = None
+                    raise HTTPException(500, f"Browser launch failed (patchright): {str(retry_error)}")
+            else:
+                if self.playwright:
+                    try:
+                        await self.playwright.stop()
+                    except Exception:
+                        pass
+                self.playwright = None
+                raise HTTPException(500, f"Browser launch failed: {str(e)}")
 
         await self.context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
@@ -423,14 +487,15 @@ class BrowserManager:
 
         self.user_data_dir = launch_user_data_dir
         self.headless = launch_headless
+        self.engine = launch_engine
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         os.makedirs(self.download_dir, exist_ok=True)
         self._attach_page_listeners(self.page)
         self.context.on("page", lambda p: self._attach_page_listeners(p))
         self.context.on("request", lambda r: asyncio.create_task(self._handle_request(r)))
         self.context.on("response", lambda r: asyncio.create_task(self._handle_response(r)))
-        logger.info("Browser started headless=%s user_data_dir=%s channel=%s", self.headless, self.user_data_dir, launch_channel)
-        return {"success": True, "message": "Browser started", "headless": self.headless, "user_data_dir": self.user_data_dir}
+        logger.info("Browser started engine=%s headless=%s user_data_dir=%s channel=%s", self.engine, self.headless, self.user_data_dir, launch_channel)
+        return {"success": True, "message": "Browser started", "engine": self.engine, "headless": self.headless, "user_data_dir": self.user_data_dir}
 
     async def stop(self):
         if not self.context:
@@ -457,6 +522,7 @@ class BrowserManager:
         self.playwright = None
         self.user_data_dir = None
         self.headless = None
+        self.engine = None
         self.dialog = None
         self.dialog_future = None
         self.download_future = None
@@ -878,7 +944,7 @@ class BrowserManager:
 
     async def get_status(self):
         if not self.context:
-            return {"running": False, "url": None, "title": None, "headless": None, "user_data_dir": None}
+            return {"running": False, "url": None, "title": None, "engine": None, "headless": None, "user_data_dir": None}
         if self.page:
             await self._ensure_page()
         title = await self.page.title() if self.page else None
@@ -886,6 +952,7 @@ class BrowserManager:
             "running": True,
             "url": self.page.url if self.page else None,
             "title": title,
+            "engine": self.engine,
             "headless": self.headless,
             "user_data_dir": self.user_data_dir,
         }
@@ -1592,7 +1659,7 @@ async def docs_raw():
 
 @app.post("/start")
 async def start_browser(req: StartRequest = StartRequest()):
-    return await browser_mgr.start(headless=req.headless, user_data_dir=req.user_data_dir, user_agent=req.user_agent, channel=req.channel)
+    return await browser_mgr.start(headless=req.headless, user_data_dir=req.user_data_dir, user_agent=req.user_agent, channel=req.channel, engine=req.engine)
 
 
 @app.post("/mcp/start")

@@ -11,6 +11,7 @@ Defaults:
 - BROWSER_USER_DATA_DIR: `./user_data`
 - BROWSER_HEADLESS: `true`
 - BROWSER_AUTO_START: `true`
+- BROWSER_ENGINE: `playwright` (`playwright` / `patchright`)
 - BROWSER_CHANNEL: `chrome`
 
 ## Endpoints
@@ -21,7 +22,7 @@ Defaults:
 $base = "http://localhost:3456"
 
 # 1) 启动浏览器（可省略，默认 AUTO_START=true）
-Invoke-RestMethod -Uri "$base/start" -Method POST -ContentType "application/json" -Body '{"headless":false,"channel":"chrome"}'
+Invoke-RestMethod -Uri "$base/start" -Method POST -ContentType "application/json" -Body '{"headless":false,"engine":"playwright","channel":"chrome"}'
 
 # 2) 访问页面
 Invoke-RestMethod -Uri "$base/navigate" -Method POST -ContentType "application/json" -Body '{"url":"https://example.com","wait_until":"networkidle","extra_wait_ms":1000}'
@@ -81,7 +82,7 @@ Invoke-RestMethod -Uri "$base/health" -Method GET
 base="http://localhost:3456"
 
 # 1) 启动浏览器（可省略）
-curl -s "$base/start" -X POST -H "Content-Type: application/json" -d '{"headless":false,"channel":"chrome"}'
+curl -s "$base/start" -X POST -H "Content-Type: application/json" -d '{"headless":false,"engine":"playwright","channel":"chrome"}'
 
 # 2) 访问页面
 curl -s "$base/navigate" -X POST -H "Content-Type: application/json" -d '{"url":"https://example.com","wait_until":"networkidle","extra_wait_ms":1000}'
@@ -145,6 +146,45 @@ curl -s "$base/docs/raw"
 ## MCP (Chrome DevTools) 快速使用
 
 当页面被反爬拦截时，可用 MCP 复用已开启远程调试的 Chrome 会话。
+
+## CLI 快速使用（推荐给 AI 直接敲命令）
+
+CLI 命令名：`browser-cli`  
+默认目标：`BROWSER_SERVER_URL`（未设置时使用 `http://192.168.31.118:3456`）
+
+### Windows 一键安装到 PATH
+
+```powershell
+browser-cli install --base-url "http://192.168.31.118:3456"
+browser-cli install --base-url "http://192.168.31.118:3456" --machine
+```
+
+### Linux 一键安装到 PATH
+
+```bash
+browser-cli install --base-url "http://192.168.31.118:3456"
+source ~/.bashrc
+```
+
+### 常用命令（Windows / Linux 通用）
+
+```bash
+browser-cli health
+browser-cli start --headless false --engine patchright --channel chrome
+browser-cli navigate --url "https://www.reuters.com/" --wait-until domcontentloaded --timeout 120000 --extra-wait-ms 8000
+browser-cli current --html --text
+browser-cli eval --script '() => ({href: location.href, title: document.title})'
+browser-cli mcp-start
+browser-cli mcp-open --url "https://example.com"
+browser-cli mcp-call --name list_pages --arguments-json '{}'
+browser-cli stop
+```
+
+### 原始接口透传
+
+```bash
+browser-cli request --method POST --path /mcp/call --body-json '{"name":"take_snapshot","arguments":{},"timeout_ms":30000}'
+```
 
 ### 环境变量
 
@@ -220,6 +260,7 @@ Response:
 - running
 - url
 - title
+- engine
 - headless
 - user_data_dir
 
@@ -306,18 +347,20 @@ Body:
 - user_data_dir: string, optional
 - user_agent: string, optional
 - channel: string, optional
+- engine: string, optional (`playwright` / `patchright`)
 
 Response:
 
 - success
 - message
+- engine
 - headless
 - user_data_dir
 
 Example:
 
 ```bash
-curl -s "$base/start" -X POST -H "Content-Type: application/json" -d '{"headless":false,"channel":"chrome"}'
+curl -s "$base/start" -X POST -H "Content-Type: application/json" -d '{"headless":false,"engine":"playwright","channel":"chrome"}'
 ```
 
 ### POST /stop
