@@ -18,8 +18,27 @@ fi
 PATH_LINE="export PATH=\"$CLI_DIR:\$PATH\""
 URL_LINE="export BROWSER_SERVER_URL=\"$BASE_URL\""
 
-grep -F "$PATH_LINE" "$SHELL_RC" >/dev/null 2>&1 || echo "$PATH_LINE" >> "$SHELL_RC"
-grep -F "export BROWSER_SERVER_URL=" "$SHELL_RC" >/dev/null 2>&1 && sed -i "s|^export BROWSER_SERVER_URL=.*|$URL_LINE|g" "$SHELL_RC" || echo "$URL_LINE" >> "$SHELL_RC"
+touch "$SHELL_RC"
+TMP_FILE="$(mktemp)"
+awk -v path_line="$PATH_LINE" -v url_line="$URL_LINE" '
+{
+  if ($0 == path_line) next
+  if ($0 ~ /^export BROWSER_SERVER_URL=/) next
+  if (!inserted && $0 ~ /^[[:space:]]*return([[:space:]].*)?$/) {
+    print path_line
+    print url_line
+    inserted=1
+  }
+  print
+}
+END {
+  if (!inserted) {
+    print path_line
+    print url_line
+  }
+}
+' "$SHELL_RC" > "$TMP_FILE"
+mv "$TMP_FILE" "$SHELL_RC"
 
 echo "Installed browser-cli PATH at: $CLI_DIR"
 echo "Set BROWSER_SERVER_URL=$BASE_URL in $SHELL_RC"
